@@ -143,9 +143,9 @@
         const shippingAddress = document.getElementById('shippingAddress')?.value || '';
         const referenceNumberElement = document.querySelector('[data-qbo-bind="text: referenceNumber"]');
         const invoiceNumber = referenceNumberElement?.textContent?.trim() || '';
-        const invoiceDateInput = document.getElementById('uniqName_8_5');
-        const invoiceDate = invoiceDateInput?.value || '';
-            
+        const invoiceDateInput = document.querySelector('.dijitDateTextBox input.dijitInputInner');
+        const invoiceDate = invoiceDateInput ? invoiceDateInput.value : '';
+
         // Get form details
         const formElement = document.querySelector('.custom-form');
         const formFields = Array.from(formElement.querySelectorAll('.custom-form-field'));
@@ -178,9 +178,9 @@
                 if (displayName || sku) {
                     productTable += `
                         <tr style="margin-bottom: 5px; height: 30px;">
-                            <td style="padding: 0 5px 0 10px;">${displayName}</td>
+                            <td>${displayName}</td>
                             <td>${sku}</td>
-                            <td style="padding: 0 5px 0 10px;">${quantity}</td>
+                            <td>${quantity}</td>
                         </tr>
                     `;
                 }
@@ -192,9 +192,9 @@
             skuMap.forEach((value, key) => {
                 productTable += `
                     <tr style="margin-bottom: 5px; height: 30px;">
-                        <td style="padding: 5px 10px;">${value.productName}</td>
-                        <td style="padding: 5px 10px;">${key}</td>
-                        <td style="padding: 5px 10px;">${value.quantity}</td>
+                        <td>${value.productName}</td>
+                        <td>${key}</td>
+                        <td>${value.quantity}</td>
                     </tr>
                 `;
             });
@@ -226,10 +226,6 @@ const printLayout = `
          .product-table tr {
                 margin-bottom: 10px;
                 height: 30px;
-            }
-
-            .product-table td {
-                padding: 5px 10px;
             }
 
         body {
@@ -357,6 +353,10 @@ const printLayout = `
             ${productTable}
         </div>
         <hr/>
+        <div class="input-group mb-3" style="display:flex; justify-content: space-between;">
+  <span class="input-group-text">Picked By : _______________.</span>
+  <span class="input-group-text">Checked By : _______________.</span>
+</div>
     </div>
 </body>
 </html>

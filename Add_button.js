@@ -180,7 +180,7 @@
                         <tr style="margin-bottom: 5px; height: 30px;">
                             <td>${displayName}</td>
                             <td>${sku}</td>
-                            <td>${quantity}</td>
+                            <td style="text-align:right;">${quantity}</td>
                         </tr>
                     `;
                 }
@@ -194,7 +194,7 @@
                     <tr style="margin-bottom: 5px; height: 30px;">
                         <td>${value.productName}</td>
                         <td>${key}</td>
-                        <td>${value.quantity}</td>
+                        <td style="text-align:right;">${value.quantity}</td>
                     </tr>
                 `;
             });

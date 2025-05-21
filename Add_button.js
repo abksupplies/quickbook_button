@@ -285,6 +285,9 @@ const printLayout = `
             margin-top: 20px;
             font-size: 14px;
         }
+        .product-table tbody tr td:first-child {
+            padding-right: 10px;
+        }
         .product-table tbody tr td:last-child {
             text-align: right;
         }

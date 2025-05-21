@@ -280,7 +280,7 @@ const printLayout = `
         }
 
         .product-table {
-            text-align: justify;
+            text-align: left;
             width: 100%;
             margin-top: 20px;
             font-size: 14px;

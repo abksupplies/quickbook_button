@@ -236,7 +236,7 @@ const printLayout = `
         .maincontainer {
             width: 100%;
             box-sizing: border-box;
-            padding: 0 20px;
+            padding: 0 15px;
             margin: 20px auto;
         }
 

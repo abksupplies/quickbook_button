@@ -234,7 +234,9 @@ const printLayout = `
         }
 
         .maincontainer {
-            width: 80%;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 0 20px;
             margin: 20px auto;
         }
 

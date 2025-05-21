@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Add Print and Pick Slip Buttons to QuickBooks Invoice
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      1.91
 // @description  Adds "Print" and "Pick Slip" buttons to QuickBooks Invoice page, checks URL every minute to ensure buttons are removed if URL no longer matches
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*

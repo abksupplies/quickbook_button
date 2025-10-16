@@ -91,14 +91,14 @@
         button.textContent = text;
         button.style.cssText = `
             position: fixed;
-            bottom: 20px;
+            bottom: 5px;
             left: ${id === 'custom-print-button' ? '15%' : 'calc(15% + 140px)'};
             padding: 12px 24px;
             background-color: #2ca01c;
             color: white;
             border: none;
             border-radius: 6px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.01);
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;

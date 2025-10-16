@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Add Print and Pick Slip Buttons to QuickBooks Invoice
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Adds "Print" and "Pick Slip" buttons to QuickBooks Invoice page with improved data loading
+// @version      2.1
+// @description  Adds "Print" and "Pick Slip" buttons to QuickBooks Invoice overlay with proper positioning
 // @author       Raj - Gorkhari (Improved)
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -14,9 +14,27 @@
     'use strict';
 
     let currentInvoiceId = null;
-    const BUTTON_CHECK_INTERVAL = 5000; // Check every 5 seconds instead of 60
+    const BUTTON_CHECK_INTERVAL = 2000; // Check every 2 seconds
     const DATA_LOAD_TIMEOUT = 10000; // Wait up to 10 seconds for data
     const DATA_CHECK_INTERVAL = 500; // Check every 500ms
+
+    // Function to check if the invoice overlay (trowser) is open and populated
+    function isInvoiceOverlayOpen() {
+        const trowserView = document.querySelector('.trowser-view');
+        if (!trowserView) return false;
+
+        const trowserBody = document.querySelector('.trowser-view .body');
+        if (!trowserBody) return false;
+
+        // Check if the body has actual content (children elements)
+        const hasContent = trowserBody.children.length > 0;
+        
+        // Also check if it's actually visible
+        const isVisible = window.getComputedStyle(trowserView).display !== 'none' &&
+                         window.getComputedStyle(trowserBody).display !== 'none';
+
+        return hasContent && isVisible;
+    }
 
     // Function to check if the current page is an invoice page
     function isInvoicePage() {
@@ -35,7 +53,7 @@
 
     // Function to wait for data to be loaded
     function waitForData(selector, timeout = DATA_LOAD_TIMEOUT) {
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             const startTime = Date.now();
             
             const checkInterval = setInterval(() => {
@@ -47,7 +65,7 @@
                     resolve(true);
                 } else if (elapsed >= timeout) {
                     clearInterval(checkInterval);
-                    resolve(false); // Don't reject, just return false
+                    resolve(false);
                 }
             }, DATA_CHECK_INTERVAL);
         });
@@ -74,7 +92,7 @@
         button.style.cssText = `
             position: fixed;
             bottom: 20px;
-            left: ${id === 'custom-print-button' ? '20px' : '150px'};
+            left: ${id === 'custom-print-button' ? '15%' : 'calc(15% + 140px)'};
             padding: 12px 24px;
             background-color: #2ca01c;
             color: white;
@@ -106,7 +124,14 @@
 
     // Function to add the buttons to the page
     async function addButtons() {
+        // First check: Must be on invoice page
         if (!isInvoicePage()) {
+            removeButtons();
+            return;
+        }
+
+        // Second check: Invoice overlay must be open
+        if (!isInvoiceOverlayOpen()) {
             removeButtons();
             return;
         }
@@ -151,7 +176,10 @@
     function removeButtons() {
         const printButton = document.getElementById('custom-print-button');
         const pickSlipButton = document.getElementById('custom-pick-slip-button');
-        if (printButton) printButton.remove();
+        if (printButton) {
+            printButton.remove();
+            console.log('Buttons removed');
+        }
         if (pickSlipButton) pickSlipButton.remove();
     }
 
@@ -501,25 +529,41 @@
         `;
     }
 
-    // Setup URL change detection
+    // Setup URL change detection and overlay monitoring
     function setupObservers() {
         // Override pushState
         const originalPushState = history.pushState;
         history.pushState = function() {
             const result = originalPushState.apply(this, arguments);
-            setTimeout(addButtons, 1000);
+            setTimeout(() => {
+                if (isInvoiceOverlayOpen()) {
+                    addButtons();
+                } else {
+                    removeButtons();
+                }
+            }, 1000);
             return result;
         };
 
         // Listen for popstate
         window.addEventListener('popstate', () => {
-            setTimeout(addButtons, 1000);
+            setTimeout(() => {
+                if (isInvoiceOverlayOpen()) {
+                    addButtons();
+                } else {
+                    removeButtons();
+                }
+            }, 1000);
         });
 
-        // Mutation observer for dynamic content
+        // Mutation observer for dynamic content (including overlay changes)
         const observer = new MutationObserver(() => {
-            if (isInvoicePage() && !document.getElementById('custom-print-button')) {
-                addButtons();
+            if (isInvoicePage() && isInvoiceOverlayOpen()) {
+                if (!document.getElementById('custom-print-button')) {
+                    addButtons();
+                }
+            } else if (!isInvoiceOverlayOpen()) {
+                removeButtons();
             }
         });
 
@@ -527,11 +571,34 @@
             childList: true,
             subtree: true
         });
+
+        // Specifically watch for overlay changes
+        const overlayObserver = new MutationObserver(() => {
+            if (isInvoiceOverlayOpen()) {
+                addButtons();
+            } else {
+                removeButtons();
+            }
+        });
+
+        // Watch for the trowser-view to appear
+        const checkForOverlay = setInterval(() => {
+            const trowserView = document.querySelector('.trowser-view');
+            if (trowserView) {
+                overlayObserver.observe(trowserView, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['style', 'class']
+                });
+                clearInterval(checkForOverlay);
+            }
+        }, 500);
     }
 
-    // Periodic check
+    // Periodic check - more frequent now to catch overlay changes
     setInterval(() => {
-        if (isInvoicePage()) {
+        if (isInvoicePage() && isInvoiceOverlayOpen()) {
             addButtons();
         } else {
             removeButtons();
@@ -540,5 +607,9 @@
 
     // Initialize
     setupObservers();
-    setTimeout(addButtons, 2000);
+    setTimeout(() => {
+        if (isInvoiceOverlayOpen()) {
+            addButtons();
+        }
+    }, 2000);
 })();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Add Print and Pick Slip Buttons to QuickBooks Invoice
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.1
 // @description  Adds "Print" and "Pick Slip" buttons to QuickBooks Invoice overlay with proper positioning
 // @author       Raj - Gorkhari (Improved)
 // @match        https://qbo.intuit.com/*
@@ -51,13 +51,23 @@
         return match ? match[1] : null;
     }
 
-    // Function to wait for data to be loaded
+    // Function to wait for data to be loaded within invoice overlay
     function waitForData(selector, timeout = DATA_LOAD_TIMEOUT) {
         return new Promise((resolve) => {
             const startTime = Date.now();
             
             const checkInterval = setInterval(() => {
-                const element = document.querySelector(selector);
+                const invoiceContainer = document.querySelector('.trowser-view .body');
+                if (!invoiceContainer) {
+                    const elapsed = Date.now() - startTime;
+                    if (elapsed >= timeout) {
+                        clearInterval(checkInterval);
+                        resolve(false);
+                    }
+                    return;
+                }
+                
+                const element = invoiceContainer.querySelector(selector);
                 const elapsed = Date.now() - startTime;
                 
                 if (element && element.textContent.trim()) {
@@ -73,7 +83,11 @@
 
     // Function to check if invoice data is loaded
     async function isInvoiceDataLoaded() {
-        // Check for multiple indicators that data is loaded
+        // First ensure the invoice overlay exists
+        const invoiceContainer = document.querySelector('.trowser-view .body');
+        if (!invoiceContainer) return false;
+
+        // Check for multiple indicators that data is loaded within the overlay
         const checks = [
             waitForData('.dgrid-row', 3000), // Product rows
             waitForData('[data-qbo-bind="text: referenceNumber"]', 3000), // Invoice number
@@ -91,14 +105,14 @@
         button.textContent = text;
         button.style.cssText = `
             position: fixed;
-            bottom: 5px;
+            bottom: 20px;
             left: ${id === 'custom-print-button' ? '15%' : 'calc(15% + 140px)'};
             padding: 12px 24px;
             background-color: #2ca01c;
             color: white;
             border: none;
             border-radius: 6px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.01);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -185,6 +199,22 @@
 
     // Improved data extraction with fallbacks
     function extractData() {
+        // CRITICAL: Get the invoice overlay container first
+        const invoiceContainer = document.querySelector('.trowser-view .body');
+        if (!invoiceContainer) {
+            console.error('Invoice overlay container not found');
+            return {
+                billingAddress: 'N/A',
+                shippingAddress: 'N/A',
+                invoiceNumber: 'N/A',
+                invoiceDate: 'N/A',
+                orderNumber: '',
+                jobName: '',
+                phoneNumber: '',
+                rows: []
+            };
+        }
+
         // Try multiple selectors for SKU as fallback
         function getSKU(row) {
             const selectors = [
@@ -222,16 +252,17 @@
             return 0;
         }
 
+        // Query within the invoice overlay ONLY
         const data = {
-            billingAddress: document.querySelector('textarea.topFieldInput.address')?.value || 'N/A',
-            shippingAddress: document.getElementById('shippingAddress')?.value || 'N/A',
-            invoiceNumber: document.querySelector('[data-qbo-bind="text: referenceNumber"]')?.textContent?.trim() || 'N/A',
-            invoiceDate: document.querySelector('.dijitDateTextBox input.dijitInputInner')?.value || 'N/A',
+            billingAddress: invoiceContainer.querySelector('textarea.topFieldInput.address')?.value || 'N/A',
+            shippingAddress: invoiceContainer.querySelector('#shippingAddress')?.value || 'N/A',
+            invoiceNumber: invoiceContainer.querySelector('[data-qbo-bind="text: referenceNumber"]')?.textContent?.trim() || 'N/A',
+            invoiceDate: invoiceContainer.querySelector('.dijitDateTextBox input.dijitInputInner')?.value || 'N/A',
             rows: []
         };
 
-        // Extract custom form fields
-        const formElement = document.querySelector('.custom-form');
+        // Extract custom form fields - scoped to invoice overlay
+        const formElement = invoiceContainer.querySelector('.custom-form');
         if (formElement) {
             const formFields = Array.from(formElement.querySelectorAll('.custom-form-field'));
             data.orderNumber = formFields.find(f => f.querySelector('label')?.textContent.trim() === 'ORDER NUMBER')?.querySelector('input')?.value || '';
@@ -243,8 +274,10 @@
             data.phoneNumber = '';
         }
 
-        // Extract product rows
-        const rows = document.querySelectorAll('.dgrid-row');
+        // Extract product rows - ONLY from invoice overlay
+        const rows = invoiceContainer.querySelectorAll('.dgrid-row');
+        console.log(`Found ${rows.length} product rows in invoice overlay`);
+        
         rows.forEach(row => {
             const productNameElement = row.querySelector('.itemColumn');
             const descriptionElement = row.querySelector('.field-description div');
@@ -256,6 +289,7 @@
 
             // Only add if we have meaningful data
             if (productName || sku || description) {
+                console.log(`Adding product: ${productName}, SKU: ${sku}, Qty: ${quantity}`);
                 data.rows.push({
                     productName,
                     description,

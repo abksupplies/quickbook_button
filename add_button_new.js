@@ -105,7 +105,7 @@
         button.textContent = text;
         button.style.cssText = `
             position: fixed;
-            bottom: 20px;
+            bottom: 4px;
             left: ${id === 'custom-print-button' ? '15%' : 'calc(15% + 140px)'};
             padding: 12px 24px;
             background-color: #2ca01c;
@@ -410,7 +410,7 @@
             width: 100%;
             display: flex;
             justify-content: space-between;
-            margin-bottom: 20px;
+            margin-bottom: 10px;
         }
 
         .TMheader-left {
@@ -433,9 +433,13 @@
         .deliveryNote {
             display: flex;
             justify-content: space-between;
-            margin-bottom: 20px;
+            margin-bottom: 10px;
             font-size: 13px;
             width: 100%;
+        }
+
+        .deliveryNote p {
+            margin-bottom: 0;
         }
 
         .deliveryNote > div {

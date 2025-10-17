@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Add Print and Pick Slip Buttons to QuickBooks Invoice
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  Adds "Print" and "Pick Slip" buttons to QuickBooks Invoice overlay with proper positioning
 // @author       Raj - Gorkhari (Improved)
 // @match        https://qbo.intuit.com/*
@@ -112,7 +112,7 @@
             color: white;
             border: none;
             border-radius: 6px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.01);
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -123,13 +123,13 @@
         button.addEventListener('mouseenter', () => {
             button.style.backgroundColor = '#248f17';
             button.style.transform = 'translateY(-2px)';
-            button.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+            button.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
         });
         
         button.addEventListener('mouseleave', () => {
             button.style.backgroundColor = '#2ca01c';
             button.style.transform = 'translateY(0)';
-            button.style.boxShadow = '0 2px 8px rgba(0,0,0,0.2)';
+            button.style.boxShadow = '0 2px 8px rgba(0,0,0,0.06)';
         });
         
         button.addEventListener('click', clickHandler);

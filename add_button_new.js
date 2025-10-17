@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Add Print and Pick Slip Buttons to QuickBooks Invoice
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  Adds "Print" and "Pick Slip" buttons to QuickBooks Invoice overlay with proper positioning
 // @author       Raj - Gorkhari (Improved)
 // @match        https://qbo.intuit.com/*
@@ -410,6 +410,11 @@
         .maincontainer h3 {
             margin-top: 0;
             margin-bottom: 0;
+        }
+
+        .ContactService textarea {
+            line-height: 1.65;
+            margin-bottom: -5px;
         }
 
         .TMheader {

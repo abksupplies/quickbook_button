@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (Stable + Safer)
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  Adds Print and Pick Slip buttons to QuickBooks invoices with safer quantity handling and stable extraction
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
@@ -244,6 +244,24 @@
     return data;
   }
 
+  function isHeaderOnlyRow(productName, description, sku, quantity) {
+    const text = (productName || description || "").trim();
+
+    // No SKU + zero qty + looks like a section heading
+    if (sku) return false;
+    if (Number(quantity || 0) !== 0) return false;
+    if (!text) return true;
+
+    // Matches rows like ** Kitchen **, ** WC **, ** Ensuite **
+    if (/^\*+\s*.+?\s*\*+$/.test(text)) return true;
+
+    // Optional: also skip very short all-text labels with no SKU and no qty
+    // Uncomment only if needed:
+    // if (!sku && Number(quantity || 0) === 0 && text.length <= 40) return true;
+
+    return false;
+  }
+
   function extractRows(root) {
     const rowElements = getRowElements(root);
     const rows = [];
@@ -254,15 +272,24 @@
       const sku = getSKU(row);
       const quantity = getQuantity(row);
 
-      if (productName || description || sku) {
-        rows.push({
-          key: sku || productName || description,
-          productName,
-          description,
-          sku,
-          quantity,
-        });
+      const displayText = productName || description || "";
+
+      // Skip truly empty rows
+      if (!productName && !description && !sku) return;
+
+      // Skip header / section rows
+      if (isHeaderOnlyRow(productName, description, sku, quantity)) {
+        return;
       }
+
+      rows.push({
+        key: sku || productName || description,
+        productName,
+        description,
+        sku,
+        quantity,
+        displayText,
+      });
     });
 
     return rows;

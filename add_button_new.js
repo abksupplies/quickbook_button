@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         QuickBooks Invoice Print + Pick Slip (Stable Version)
+// @name         QuickBooks Invoice Print + Pick Slip (Stable + Safer)
 // @namespace    http://tampermonkey.net/
-// @version      2.9
-// @description  Adds reliable Print and Pick Slip buttons to QuickBooks invoices with stable row extraction and safer quantity handling
+// @version      3.1
+// @description  Adds Print and Pick Slip buttons to QuickBooks invoices with safer quantity handling and stable extraction
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -14,29 +14,20 @@
   "use strict";
 
   const CONFIG = {
-    buttonCheckIntervalMs: 2500,
-    mutationDebounceMs: 600,
-    initialBootDelayMs: 2000,
-    rootWaitTimeoutMs: 15000,
-    stableReadAttempts: 8,
-    stableReadDelayMs: 350,
-    rowReadyTimeoutMs: 12000,
-    rowReadyPollMs: 250,
+    buttonCheckIntervalMs: 2000,
+    mutationDebounceMs: 500,
+    initialBootDelayMs: 1800,
+    stableReadAttempts: 6,
+    stableReadDelayMs: 250,
     debug: true,
   };
 
   const STATE = {
     currentInvoiceId: null,
     addButtonsInFlight: false,
-    buttonsMounted: false,
-    mutationDebounceTimer: null,
-    observer: null,
+    mutationTimer: null,
     lastUrl: location.href,
   };
-
-  // ---------------------------
-  // Logging
-  // ---------------------------
 
   function log(...args) {
     if (CONFIG.debug) console.log("[QBO Pick Slip]", ...args);
@@ -45,14 +36,6 @@
   function warn(...args) {
     console.warn("[QBO Pick Slip]", ...args);
   }
-
-  function error(...args) {
-    console.error("[QBO Pick Slip]", ...args);
-  }
-
-  // ---------------------------
-  // Utilities
-  // ---------------------------
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,27 +51,7 @@
   }
 
   function normalizeText(value) {
-    return String(value ?? "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  function isVisible(el) {
-    if (!el || !document.contains(el)) return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-      return false;
-    }
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-
-  function tryParseNumber(raw) {
-    if (raw == null) return null;
-    const text = String(raw).replace(/,/g, "").trim();
-    if (!text) return null;
-    const value = Number(text);
-    return Number.isFinite(value) ? value : null;
+    return String(value ?? "").replace(/\s+/g, " ").trim();
   }
 
   function getElementValue(el) {
@@ -101,21 +64,13 @@
     return "";
   }
 
-  function stableStringifyRows(rows) {
-    return JSON.stringify(
-      rows.map((row) => ({
-        key: row.key,
-        productName: row.productName,
-        description: row.description,
-        sku: row.sku,
-        quantity: row.quantity,
-      }))
-    );
+  function tryParseNumber(raw) {
+    if (raw == null) return null;
+    const text = String(raw).replace(/,/g, "").trim();
+    if (!text) return null;
+    const value = Number(text);
+    return Number.isFinite(value) ? value : null;
   }
-
-  // ---------------------------
-  // Page / Context Detection
-  // ---------------------------
 
   function isInvoicePage() {
     const url = window.location.href;
@@ -133,12 +88,8 @@
   }
 
   function getInvoiceRoot() {
-    const overlayRoot = document.querySelector(".trowser-view .body");
-    if (overlayRoot && overlayRoot.children.length > 0 && isVisible(overlayRoot)) {
-      return overlayRoot;
-    }
-
     const candidates = [
+      document.querySelector(".trowser-view .body"),
       document.querySelector('[data-automation-id="invoice-form"]'),
       document.querySelector('[data-automation-id="invoice-editor"]'),
       document.querySelector(".invoice-content"),
@@ -147,15 +98,15 @@
       document.body,
     ].filter(Boolean);
 
-    for (const candidate of candidates) {
+    for (const c of candidates) {
       if (
-        candidate.querySelector(".dgrid-row") ||
-        candidate.querySelector('[data-qbo-bind="text: referenceNumber"]') ||
-        candidate.querySelector("textarea.topFieldInput.address") ||
-        candidate.querySelector("#shippingAddress") ||
-        candidate.querySelector(".custom-form")
+        c.querySelector(".dgrid-row") ||
+        c.querySelector('[data-qbo-bind="text: referenceNumber"]') ||
+        c.querySelector("textarea.topFieldInput.address") ||
+        c.querySelector("#shippingAddress") ||
+        c.querySelector(".custom-form")
       ) {
-        return candidate;
+        return c;
       }
     }
 
@@ -163,29 +114,12 @@
   }
 
   function isInvoiceEditorOpen() {
-    const root = getInvoiceRoot();
-    return !!(root && isVisible(root));
+    return !!getInvoiceRoot();
   }
-
-  async function waitForInvoiceRoot(timeoutMs = CONFIG.rootWaitTimeoutMs) {
-    const start = Date.now();
-
-    while (Date.now() - start < timeoutMs) {
-      const root = getInvoiceRoot();
-      if (root && isVisible(root)) return root;
-      await sleep(200);
-    }
-
-    return null;
-  }
-
-  // ---------------------------
-  // Row Extraction
-  // ---------------------------
 
   function getRowElements(root) {
     if (!root) return [];
-    return Array.from(root.querySelectorAll(".dgrid-row")).filter((row) => document.contains(row));
+    return Array.from(root.querySelectorAll(".dgrid-row"));
   }
 
   function getSKU(row) {
@@ -195,7 +129,6 @@
       ".sku-field",
       ".itemSKU",
       '[aria-label*="SKU"]',
-      '[data-testid*="sku"]',
     ];
 
     for (const selector of selectors) {
@@ -212,10 +145,9 @@
       ".field-quantity-inner",
       '[data-automation-id="quantity"]',
       ".quantity-field",
+      ".field-qty",
       'input[aria-label*="Quantity"]',
       'input[name*="quantity"]',
-      '[data-testid*="quantity"]',
-      ".field-qty",
     ];
 
     for (const selector of selectors) {
@@ -227,21 +159,21 @@
       if (parsed != null) return parsed;
     }
 
-    // Fallback: search any input-like elements in the row that look like quantity
-    const fallbackInputs = Array.from(row.querySelectorAll("input, [contenteditable='true'], span, div"));
-    for (const el of fallbackInputs) {
-      const aria = (el.getAttribute?.("aria-label") || "").toLowerCase();
-      const name = (el.getAttribute?.("name") || "").toLowerCase();
-      const cls = (el.className || "").toString().toLowerCase();
+    const allCandidates = Array.from(row.querySelectorAll("input, span, div"));
+    for (const el of allCandidates) {
+      const cls = String(el.className || "").toLowerCase();
+      const aria = String(el.getAttribute?.("aria-label") || "").toLowerCase();
+      const name = String(el.getAttribute?.("name") || "").toLowerCase();
 
-      const looksLikeQuantity =
-        aria.includes("quantity") || name.includes("quantity") || cls.includes("quantity") || cls.includes("qty");
-
-      if (!looksLikeQuantity) continue;
-
-      const value = getElementValue(el);
-      const parsed = tryParseNumber(value);
-      if (parsed != null) return parsed;
+      if (
+        cls.includes("quantity") ||
+        cls.includes("qty") ||
+        aria.includes("quantity") ||
+        name.includes("quantity")
+      ) {
+        const parsed = tryParseNumber(getElementValue(el));
+        if (parsed != null) return parsed;
+      }
     }
 
     return 0;
@@ -251,7 +183,6 @@
     const selectors = [
       ".itemColumn",
       '[data-automation-id="item-name"]',
-      ".field-product-service .itemColumn",
       ".itemName",
     ];
 
@@ -281,15 +212,6 @@
     return "";
   }
 
-  function isLikelyDataRow(row) {
-    const productName = getProductName(row);
-    const description = getDescription(row);
-    const sku = getSKU(row);
-    const quantity = getQuantity(row);
-
-    return Boolean(productName || description || sku || quantity);
-  }
-
   function extractHeaderData(root) {
     const data = {
       billingAddress: getElementValue(root.querySelector("textarea.topFieldInput.address")) || "N/A",
@@ -311,7 +233,7 @@
           const label = normalizeText(f.querySelector("label")?.textContent);
           return label.toLowerCase() === labelText.toLowerCase();
         });
-        return field ? getElementValue(field.querySelector("input, textarea, select")) : "";
+        return field ? getElementValue(field.querySelector("input")) : "";
       };
 
       data.orderNumber = findFieldValue("ORDER NUMBER");
@@ -326,27 +248,22 @@
     const rowElements = getRowElements(root);
     const rows = [];
 
-    for (const rowEl of rowElements) {
-      if (!isLikelyDataRow(rowEl)) continue;
+    rowElements.forEach((row) => {
+      const productName = getProductName(row);
+      const description = getDescription(row);
+      const sku = getSKU(row);
+      const quantity = getQuantity(row);
 
-      const productName = getProductName(rowEl);
-      const description = getDescription(rowEl);
-      const sku = getSKU(rowEl);
-      const quantity = getQuantity(rowEl);
-
-      // Skip obviously incomplete ghost rows
-      if (!productName && !description && !sku) continue;
-
-      const key = sku || `NAME:${productName}` || `DESC:${description}`;
-
-      rows.push({
-        key,
-        productName,
-        description,
-        sku,
-        quantity,
-      });
-    }
+      if (productName || description || sku) {
+        rows.push({
+          key: sku || productName || description,
+          productName,
+          description,
+          sku,
+          quantity,
+        });
+      }
+    });
 
     return rows;
   }
@@ -355,7 +272,6 @@
     const root = getInvoiceRoot();
 
     if (!root) {
-      error("Invoice root not found during extraction");
       return {
         billingAddress: "N/A",
         shippingAddress: "N/A",
@@ -368,80 +284,41 @@
       };
     }
 
-    const header = extractHeaderData(root);
-    const rows = extractRows(root);
-
     return {
-      ...header,
-      rows,
+      ...extractHeaderData(root),
+      rows: extractRows(root),
     };
   }
 
-  // ---------------------------
-  // Stable Read / Readiness
-  // ---------------------------
-
-  function hasUsableRows(data) {
-    if (!data || !Array.isArray(data.rows) || data.rows.length === 0) return false;
-
-    return data.rows.some((row) => {
-      const hasIdentity = Boolean(row.productName || row.description || row.sku);
-      const hasQty = typeof row.quantity === "number" && row.quantity >= 0;
-      return hasIdentity && hasQty;
-    });
-  }
-
-  async function waitForRowsReady(timeoutMs = CONFIG.rowReadyTimeoutMs) {
-    const start = Date.now();
-
-    while (Date.now() - start < timeoutMs) {
-      const data = extractData();
-
-      if (hasUsableRows(data)) {
-        // One extra stability delay to avoid mid-render scrape
-        await sleep(250);
-        const secondData = extractData();
-
-        if (
-          hasUsableRows(secondData) &&
-          stableStringifyRows(data.rows) === stableStringifyRows(secondData.rows)
-        ) {
-          return true;
-        }
-      }
-
-      await sleep(CONFIG.rowReadyPollMs);
-    }
-
-    return false;
+  function stableRowsSignature(rows) {
+    return JSON.stringify(
+      rows.map((r) => ({
+        key: r.key,
+        sku: r.sku,
+        productName: r.productName,
+        quantity: r.quantity,
+      }))
+    );
   }
 
   async function getStableExtractedData() {
-    let previousSignature = null;
-    let previousData = null;
+    let previousSig = null;
+    let latest = extractData();
 
     for (let i = 0; i < CONFIG.stableReadAttempts; i++) {
-      const data = extractData();
-      const signature = stableStringifyRows(data.rows);
+      latest = extractData();
+      const sig = stableRowsSignature(latest.rows);
 
-      log(`Stable read attempt ${i + 1}/${CONFIG.stableReadAttempts}`, data.rows);
-
-      if (hasUsableRows(data) && signature && previousSignature === signature) {
-        return data;
+      if (latest.rows.length > 0 && sig === previousSig) {
+        return latest;
       }
 
-      previousSignature = signature;
-      previousData = data;
+      previousSig = sig;
       await sleep(CONFIG.stableReadDelayMs);
     }
 
-    warn("Returning best-effort data; row state did not fully stabilize.");
-    return previousData || extractData();
+    return latest;
   }
-
-  // ---------------------------
-  // Buttons
-  // ---------------------------
 
   function createButton(id, text, clickHandler, left) {
     const button = document.createElement("button");
@@ -450,25 +327,25 @@
     button.textContent = text;
     button.style.cssText = `
       position: fixed;
-      bottom: 8px;
+      bottom: 4px;
       left: ${left};
-      padding: 12px 22px;
+      padding: 12px 24px;
       background-color: #2ca01c;
-      color: #fff;
+      color: white;
       border: none;
       border-radius: 6px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.08);
       cursor: pointer;
       font-size: 14px;
       font-weight: 600;
-      z-index: 100000;
+      z-index: 10000;
       transition: all 0.2s ease;
     `;
 
     button.addEventListener("mouseenter", () => {
       button.style.backgroundColor = "#248f17";
-      button.style.transform = "translateY(-1px)";
-      button.style.boxShadow = "0 4px 12px rgba(0,0,0,0.14)";
+      button.style.transform = "translateY(-2px)";
+      button.style.boxShadow = "0 4px 12px rgba(0,0,0,0.12)";
     });
 
     button.addEventListener("mouseleave", () => {
@@ -478,19 +355,12 @@
     });
 
     button.addEventListener("click", clickHandler);
-
     return button;
   }
 
   function removeButtons() {
-    const ids = ["custom-print-button", "custom-pick-slip-button"];
-
-    for (const id of ids) {
-      const el = document.getElementById(id);
-      if (el) el.remove();
-    }
-
-    STATE.buttonsMounted = false;
+    document.getElementById("custom-print-button")?.remove();
+    document.getElementById("custom-pick-slip-button")?.remove();
   }
 
   async function addButtons() {
@@ -498,7 +368,12 @@
     STATE.addButtonsInFlight = true;
 
     try {
-      if (!isInvoicePage() || !isInvoiceEditorOpen()) {
+      if (!isInvoicePage()) {
+        removeButtons();
+        return;
+      }
+
+      if (!isInvoiceEditorOpen()) {
         removeButtons();
         return;
       }
@@ -509,76 +384,36 @@
         removeButtons();
       }
 
-      if (document.getElementById("custom-print-button") && document.getElementById("custom-pick-slip-button")) {
-        STATE.buttonsMounted = true;
-        return;
-      }
-
-      const root = await waitForInvoiceRoot();
-      if (!root) {
-        warn("Invoice root not found in time.");
-        return;
-      }
-
-      const ready = await waitForRowsReady();
-      if (!ready) {
-        warn("Invoice rows not ready yet.");
-        return;
-      }
-
       if (!document.getElementById("custom-print-button")) {
-        const printButton = createButton(
-          "custom-print-button",
-          "🖨️ Print",
-          async () => {
+        document.body.appendChild(
+          createButton("custom-print-button", "🖨️ Print", async () => {
             await generateProductTable(false);
-          },
-          "15%"
+          }, "15%")
         );
-        document.body.appendChild(printButton);
       }
 
       if (!document.getElementById("custom-pick-slip-button")) {
-        const pickSlipButton = createButton(
-          "custom-pick-slip-button",
-          "📋 Pick Slip",
-          async () => {
+        document.body.appendChild(
+          createButton("custom-pick-slip-button", "📋 Pick Slip", async () => {
             await generateProductTable(true);
-          },
-          "calc(15% + 150px)"
+          }, "calc(15% + 140px)")
         );
-        document.body.appendChild(pickSlipButton);
       }
-
-      STATE.buttonsMounted = true;
-      log("Buttons added successfully.");
-    } catch (err) {
-      error("Failed to add buttons:", err);
     } finally {
       STATE.addButtonsInFlight = false;
     }
   }
 
-  // ---------------------------
-  // Print / Pick Slip Generation
-  // ---------------------------
-
   function buildProductTable(rows, combineQuantities) {
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return "<p>No valid products found.</p>";
-    }
+    if (!rows.length) return "<p>No valid products found.</p>";
 
-    let tableRows = "";
+    let html = "";
 
     if (combineQuantities) {
       const grouped = new Map();
 
-      for (const row of rows) {
-        const identityKey = row.sku || row.productName || row.description;
-        if (!identityKey) continue;
-
-        const groupKey = row.sku ? `SKU:${row.sku}` : `NAME:${identityKey}`;
-
+      rows.forEach((row) => {
+        const groupKey = row.sku ? `SKU:${row.sku}` : `NAME:${row.productName || row.description}`;
         if (!grouped.has(groupKey)) {
           grouped.set(groupKey, {
             productName: row.productName || row.description || "",
@@ -586,42 +421,40 @@
             quantity: Number(row.quantity || 0),
           });
         } else {
-          const existing = grouped.get(groupKey);
-          existing.quantity += Number(row.quantity || 0);
+          grouped.get(groupKey).quantity += Number(row.quantity || 0);
         }
-      }
+      });
 
-      for (const [, value] of grouped) {
-        tableRows += `
-          <tr style="height: 30px;">
+      grouped.forEach((value) => {
+        html += `
+          <tr style="height:30px;">
             <td>${escapeHtml(value.productName)}</td>
             <td>${escapeHtml(value.sku)}</td>
             <td style="text-align:right;">${escapeHtml(value.quantity)}</td>
           </tr>
         `;
-      }
+      });
     } else {
-      for (const row of rows) {
+      rows.forEach((row) => {
         const displayName = row.productName || (row.sku ? "" : row.description);
-        if (!displayName && !row.sku) continue;
 
-        tableRows += `
-          <tr style="height: 30px;">
-            <td>${escapeHtml(displayName)}</td>
-            <td>${escapeHtml(row.sku)}</td>
-            <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
-          </tr>
-        `;
-      }
+        if (displayName || row.sku) {
+          html += `
+            <tr style="height:30px;">
+              <td>${escapeHtml(displayName)}</td>
+              <td>${escapeHtml(row.sku)}</td>
+              <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
+            </tr>
+          `;
+        }
+      });
     }
 
-    if (!tableRows) {
-      return "<p>No valid products found.</p>";
-    }
+    if (!html) return "<p>No valid products found.</p>";
 
     return `
       <table class="product-table">
-        <thead style="background: lightgrey;">
+        <thead style="background:lightgrey;">
           <tr>
             <th>Product Name</th>
             <th>SKU</th>
@@ -629,59 +462,38 @@
           </tr>
         </thead>
         <tbody>
-          ${tableRows}
+          ${html}
         </tbody>
       </table>
     `;
   }
 
   async function generateProductTable(combineQuantities) {
-    try {
-      const root = await waitForInvoiceRoot();
-      if (!root) {
-        alert("Invoice was not found. Please wait for the invoice to load and try again.");
-        return;
-      }
+    const data = await getStableExtractedData();
 
-      const ready = await waitForRowsReady();
-      if (!ready) {
-        alert("Invoice lines are still loading. Please wait a moment and try again.");
-        return;
-      }
-
-      const data = await getStableExtractedData();
-
-      if (!data || !Array.isArray(data.rows) || data.rows.length === 0) {
-        alert("No product data found. Please ensure the invoice is fully loaded.");
-        return;
-      }
-
-      log("Final extracted data:", data);
-
-      const productTable = buildProductTable(data.rows, combineQuantities);
-      const printLayout = generatePrintLayout(data, productTable);
-
-      const printWindow = window.open("", "_blank", "width=1000,height=800,noopener,noreferrer");
-      if (!printWindow) {
-        alert("Popup blocked. Please allow popups for QuickBooks and try again.");
-        return;
-      }
-
-      printWindow.document.open();
-      printWindow.document.write(printLayout);
-      printWindow.document.close();
-
-      // Wait for images/layout before printing
-      printWindow.onload = () => {
-        setTimeout(() => {
-          printWindow.focus();
-          printWindow.print();
-        }, 350);
-      };
-    } catch (err) {
-      error("Printing failed:", err);
-      alert("Printing failed. Check the browser console for details.");
+    if (!data.rows.length) {
+      alert("No product data found. Please ensure the invoice is fully loaded.");
+      return;
     }
+
+    const productTable = buildProductTable(data.rows, combineQuantities);
+    const printLayout = generatePrintLayout(data, productTable);
+
+    const newWindow = window.open("", "_blank", "width=900,height=700");
+    if (!newWindow) {
+      alert("Popup blocked. Please allow popups for QuickBooks.");
+      return;
+    }
+
+    newWindow.document.write(printLayout);
+    newWindow.document.close();
+
+    newWindow.onload = () => {
+      setTimeout(() => {
+        newWindow.focus();
+        newWindow.print();
+      }, 300);
+    };
   }
 
   function generatePrintLayout(data, productTable) {
@@ -693,118 +505,26 @@
   <title>Invoice ${escapeHtml(data.invoiceNumber)}</title>
   <style>
     * { box-sizing: border-box; }
-    body {
-      font-family: Arial, sans-serif;
-      line-height: 1.45;
-      margin: 0;
-      padding: 0;
-      color: #000;
-    }
-    .maincontainer {
-      width: 100%;
-      padding: 20px;
-      margin: 0 auto;
-    }
-    .maincontainer h3 {
-      margin-top: 0;
-      margin-bottom: 8px;
-    }
-    .ContactService textarea {
-      line-height: 1.5;
-      margin-bottom: 4px;
-      resize: none;
-      font-family: Arial, sans-serif;
-    }
-    .TMheader {
-      width: 100%;
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 8px;
-    }
-    .TMheader-left {
-      width: 70%;
-      display: flex;
-      gap: 20px;
-      font-size: 13px;
-    }
-    .TMheader-left img {
-      max-width: 150px;
-      height: auto;
-    }
-    .TMheader-right {
-      width: 30%;
-      font-size: 10px;
-    }
-    .deliveryNote {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 10px;
-      font-size: 13px;
-      width: 100%;
-    }
-    .deliveryNote p {
-      margin: 4px 0 0;
-      white-space: pre-line;
-    }
-    .deliveryNote > div {
-      width: 33.33%;
-      white-space: pre-line;
-      word-break: break-word;
-    }
-    .orderProducts {
-      margin-top: 18px;
-      border-top: 1px solid #000;
-      padding-top: 6px;
-    }
-    .product-table {
-      text-align: left;
-      width: 100%;
-      margin-top: 10px;
-      font-size: 13px;
-      border-collapse: collapse;
-    }
-    .product-table th {
-      padding: 8px;
-      text-align: left;
-      border-bottom: 1px solid #bbb;
-    }
-    .product-table td {
-      padding: 6px 8px;
-      border-bottom: 1px solid #eee;
-      vertical-align: top;
-    }
-    .product-table tbody tr td:last-child {
-      text-align: right;
-      white-space: nowrap;
-    }
-    .orderNote {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      font-size: 13px;
-      margin: 10px 0 12px;
-    }
-    .orderNote > div {
-      width: 33.33%;
-      word-break: break-word;
-    }
-    .input-group {
-      display: flex;
-      justify-content: space-between;
-      font-size: 12px;
-      margin-top: 16px;
-    }
-    hr {
-      border: none;
-      border-top: 1px solid #ccc;
-      margin: 10px 0;
-    }
-    @media print {
-      body { margin: 0; }
-      .maincontainer { padding: 14px; }
-    }
+    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; }
+    .maincontainer { width: 100%; padding: 20px; margin: 0 auto; line-height: 1.4; }
+    .maincontainer h3 { margin-top: 0; margin-bottom: 0; }
+    .ContactService textarea { line-height: 1.65; margin-bottom: -5px; }
+    .TMheader { width: 100%; display: flex; justify-content: space-between; margin-bottom: 0px; }
+    .TMheader-left { width: 70%; display: flex; font-size: 13px; gap: 20px; }
+    .TMheader-left img { max-width: 150px; height: auto; }
+    .TMheader-right { width: 30%; font-size: 10px; }
+    .deliveryNote { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 13px; width: 100%; }
+    .deliveryNote p { margin-bottom: 0; }
+    .deliveryNote > div { width: 33.3%; white-space: pre-line; }
+    .orderProducts { margin-top: 20px; border-top: 1px solid #000; }
+    .product-table { text-align: left; width: 100%; margin-top: 20px; font-size: 14px; border-collapse: collapse; }
+    .product-table th { padding: 8px; text-align: left; }
+    .product-table td { padding: 6px; }
+    .product-table tbody tr td:last-child { text-align: right; }
+    .orderNote { display: flex; justify-content: space-between; font-size: 14px; margin: 12px 0; }
+    .input-group { display: flex; justify-content: space-between; margin-top: 20px; font-size: 12px; }
+    hr { border: none; border-top: 1px solid #ccc; margin: 10px 0; }
+    @media print { body { margin: 0; } .maincontainer { padding: 15px; } }
   </style>
 </head>
 <body>
@@ -832,18 +552,18 @@
       </div>
     </div>
 
-    <h3>Delivery Note</h3>
+    <h3 style="margin-bottom:10px">Delivery Note</h3>
 
     <div class="deliveryNote">
-      <div class="deliveryNote-1">
+      <div>
         <b>INVOICE TO</b>
         <p>${escapeHtml(data.billingAddress)}</p>
       </div>
-      <div class="deliveryNote-2">
+      <div>
         <b>SHIP TO</b>
         <p>${escapeHtml(data.shippingAddress)}</p>
       </div>
-      <div class="deliveryNote-3">
+      <div>
         <b>INVOICE NO.:</b>
         <span>${escapeHtml(data.invoiceNumber)}</span><br/>
         <b>DATE:</b>
@@ -863,7 +583,7 @@
       ${productTable}
     </div>
 
-    <hr>
+    <hr/>
 
     <div class="input-group">
       <span>Picked By: _______________</span>
@@ -875,87 +595,41 @@
     `;
   }
 
-  // ---------------------------
-  // SPA Navigation / Observers
-  // ---------------------------
-
-  function scheduleButtonRefresh() {
-    clearTimeout(STATE.mutationDebounceTimer);
-    STATE.mutationDebounceTimer = setTimeout(() => {
-      if (isInvoicePage() && isInvoiceEditorOpen()) {
-        addButtons();
-      } else {
-        removeButtons();
-      }
+  function refreshButtons() {
+    clearTimeout(STATE.mutationTimer);
+    STATE.mutationTimer = setTimeout(() => {
+      if (isInvoicePage() && isInvoiceEditorOpen()) addButtons();
+      else removeButtons();
     }, CONFIG.mutationDebounceMs);
   }
 
-  function patchHistoryMethods() {
+  function setupObservers() {
     const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-
     history.pushState = function () {
       const result = originalPushState.apply(this, arguments);
-      setTimeout(handleUrlChange, 300);
+      setTimeout(refreshButtons, 500);
       return result;
     };
-
-    history.replaceState = function () {
-      const result = originalReplaceState.apply(this, arguments);
-      setTimeout(handleUrlChange, 300);
-      return result;
-    };
-  }
-
-  function handleUrlChange() {
-    if (location.href !== STATE.lastUrl) {
-      log("URL changed:", STATE.lastUrl, "=>", location.href);
-      STATE.lastUrl = location.href;
-      scheduleButtonRefresh();
-    }
-  }
-
-  function setupObservers() {
-    patchHistoryMethods();
 
     window.addEventListener("popstate", () => {
-      setTimeout(handleUrlChange, 300);
+      setTimeout(refreshButtons, 500);
     });
 
-    STATE.observer = new MutationObserver(() => {
-      scheduleButtonRefresh();
+    const observer = new MutationObserver(() => {
+      refreshButtons();
     });
 
-    STATE.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  function startPeriodicCheck() {
-    setInterval(() => {
-      if (isInvoicePage() && isInvoiceEditorOpen()) {
-        addButtons();
-      } else {
-        removeButtons();
-      }
-    }, CONFIG.buttonCheckIntervalMs);
-  }
+  setInterval(() => {
+    if (isInvoicePage() && isInvoiceEditorOpen()) addButtons();
+    else removeButtons();
+  }, CONFIG.buttonCheckIntervalMs);
 
-  // ---------------------------
-  // Init
-  // ---------------------------
+  setupObservers();
 
-  async function init() {
-    setupObservers();
-    startPeriodicCheck();
-
-    await sleep(CONFIG.initialBootDelayMs);
-
-    if (isInvoicePage() && isInvoiceEditorOpen()) {
-      addButtons();
-    }
-  }
-
-  init();
+  setTimeout(() => {
+    if (isInvoicePage() && isInvoiceEditorOpen()) addButtons();
+  }, CONFIG.initialBootDelayMs);
 })();

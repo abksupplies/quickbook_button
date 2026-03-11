@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (Stable + Safer)
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  Adds Print and Pick Slip buttons to QuickBooks invoices with safer quantity handling and stable extraction
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
@@ -263,37 +263,32 @@
   }
 
   function extractRows(root) {
-    const rowElements = getRowElements(root);
-    const rows = [];
+  const rowElements = getRowElements(root);
+  const rows = [];
 
-    rowElements.forEach((row) => {
-      const productName = getProductName(row);
-      const description = getDescription(row);
-      const sku = getSKU(row);
-      const quantity = getQuantity(row);
+  rowElements.forEach((row) => {
+    const productName = getProductName(row);
+    const description = getDescription(row);
+    const sku = getSKU(row);
+    const quantity = getQuantity(row);
 
-      const displayText = productName || description || "";
+    const displayText = productName || description || "";
 
-      // Skip truly empty rows
-      if (!productName && !description && !sku) return;
+    // Skip only truly empty rows
+    if (!productName && !description && !sku) return;
 
-      // Skip header / section rows
-      if (isHeaderOnlyRow(productName, description, sku, quantity)) {
-        return;
-      }
-
-      rows.push({
-        key: sku || productName || description,
-        productName,
-        description,
-        sku,
-        quantity,
-        displayText,
-      });
+    rows.push({
+      key: sku || productName || description,
+      productName,
+      description,
+      sku,
+      quantity,
+      displayText,
     });
+  });
 
-    return rows;
-  }
+  return rows;
+}
 
   function extractData() {
     const root = getInvoiceRoot();
@@ -432,68 +427,83 @@
   }
 
   function buildProductTable(rows, combineQuantities) {
-    if (!rows.length) return "<p>No valid products found.</p>";
+  if (!rows.length) return "<p>No valid products found.</p>";
 
-    let html = "";
+  let html = "";
 
-    if (combineQuantities) {
-      const grouped = new Map();
+  if (combineQuantities) {
+    const grouped = new Map();
 
-      rows.forEach((row) => {
-        const groupKey = row.sku ? `SKU:${row.sku}` : `NAME:${row.productName || row.description}`;
-        if (!grouped.has(groupKey)) {
-          grouped.set(groupKey, {
-            productName: row.productName || row.description || "",
-            sku: row.sku || "",
-            quantity: Number(row.quantity || 0),
-          });
-        } else {
-          grouped.get(groupKey).quantity += Number(row.quantity || 0);
-        }
-      });
+    rows.forEach((row) => {
+      const text = (row.productName || row.description || "").trim();
+      const qty = Number(row.quantity || 0);
 
-      grouped.forEach((value) => {
+      // Skip section/header rows only for Pick Slip
+      if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) {
+        return;
+      }
+
+      // Skip invalid non-item rows in Pick Slip
+      if (!row.sku && qty === 0) {
+        return;
+      }
+
+      const groupKey = row.sku ? `SKU:${row.sku}` : `NAME:${row.productName || row.description}`;
+
+      if (!grouped.has(groupKey)) {
+        grouped.set(groupKey, {
+          productName: row.productName || row.description || "",
+          sku: row.sku || "",
+          quantity: qty,
+        });
+      } else {
+        grouped.get(groupKey).quantity += qty;
+      }
+    });
+
+    grouped.forEach((value) => {
+      html += `
+        <tr style="height:30px;">
+          <td>${escapeHtml(value.productName)}</td>
+          <td>${escapeHtml(value.sku)}</td>
+          <td style="text-align:right;">${escapeHtml(value.quantity)}</td>
+        </tr>
+      `;
+    });
+  } else {
+    // Print mode: keep empty/header line items
+    rows.forEach((row) => {
+      const displayName = row.productName || (row.sku ? "" : row.description);
+
+      if (displayName || row.sku) {
         html += `
           <tr style="height:30px;">
-            <td>${escapeHtml(value.productName)}</td>
-            <td>${escapeHtml(value.sku)}</td>
-            <td style="text-align:right;">${escapeHtml(value.quantity)}</td>
+            <td>${escapeHtml(displayName)}</td>
+            <td>${escapeHtml(row.sku)}</td>
+            <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
           </tr>
         `;
-      });
-    } else {
-      rows.forEach((row) => {
-        const displayName = row.productName || (row.sku ? "" : row.description);
-
-        if (displayName || row.sku) {
-          html += `
-            <tr style="height:30px;">
-              <td>${escapeHtml(displayName)}</td>
-              <td>${escapeHtml(row.sku)}</td>
-              <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
-            </tr>
-          `;
-        }
-      });
-    }
-
-    if (!html) return "<p>No valid products found.</p>";
-
-    return `
-      <table class="product-table">
-        <thead style="background:lightgrey;">
-          <tr>
-            <th>Product Name</th>
-            <th>SKU</th>
-            <th>Quantity</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${html}
-        </tbody>
-      </table>
-    `;
+      }
+    });
   }
+
+  if (!html) return "<p>No valid products found.</p>";
+
+  return `
+    <table class="product-table">
+      <thead style="background:lightgrey;">
+        <tr>
+          <th>Product Name</th>
+          <th>SKU</th>
+          <th>Quantity</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${html}
+      </tbody>
+    </table>
+  `;
+}
 
   async function generateProductTable(combineQuantities) {
     const data = await getStableExtractedData();

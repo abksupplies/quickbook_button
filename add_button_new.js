@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (Stable + Safer)
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @description  Adds Print and Pick Slip buttons to QuickBooks invoices with safer quantity handling and stable extraction
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
@@ -356,7 +356,7 @@
       position: fixed;
       bottom: 4px;
       left: ${left};
-      padding: 12px 24px;
+      padding: 2px 24px;
       background-color: #2ca01c;
       color: white;
       border: none;

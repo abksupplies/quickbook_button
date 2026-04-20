@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         QuickBooks Invoice Print + Pick Slip (Stable + Safer)
+// @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.0
 // @description  Print / Pick Slip for new QuickBooks invoice table UI
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*

@@ -1,15 +1,14 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
-// @description  Print / Pick Slip for new QuickBooks invoice table UI
+// @version      5.1
+// @description  Reliable Print / Pick Slip for the new QuickBooks invoice table UI
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
-
 
 (function () {
   "use strict";
@@ -31,6 +30,10 @@
 
   function log(...args) {
     if (CONFIG.debug) console.log("[QBO Pick Slip]", ...args);
+  }
+
+  function warn(...args) {
+    console.warn("[QBO Pick Slip]", ...args);
   }
 
   function sleep(ms) {
@@ -62,7 +65,10 @@
 
   function tryParseNumber(raw) {
     if (raw == null) return null;
-    const text = String(raw).replace(/,/g, "").trim();
+    const text = String(raw)
+      .replace(/,/g, "")
+      .replace(/[A$]/g, "")
+      .trim();
     if (!text) return null;
     const value = Number(text);
     return Number.isFinite(value) ? value : null;
@@ -92,7 +98,10 @@
 
     for (const root of roots) {
       const text = root.textContent || "";
-      if (text.includes("Product or service") && text.includes("Qty") && text.includes("Amount")) {
+      if (
+        text.includes("Product or service") ||
+        text.includes("Product/service")
+      ) {
         return root;
       }
     }
@@ -107,18 +116,40 @@
   function findInvoiceTable(root) {
     const tables = Array.from(root.querySelectorAll("table"));
     for (const table of tables) {
-      const headerText = normalizeText(table.querySelector("thead")?.textContent || "");
-      if (
-        headerText.includes("Product/service") &&
-        headerText.includes("Description") &&
-        headerText.includes("Qty") &&
-        headerText.includes("Amount") &&
-        headerText.includes("GST")
-      ) {
+      const headerTexts = Array.from(table.querySelectorAll("thead th")).map((th) =>
+        normalizeText(th.textContent)
+      );
+
+      const hasProduct = headerTexts.some((t) => /product\s*\/?\s*service/i.test(t));
+      const hasQty = headerTexts.some((t) => /^qty$/i.test(t) || /^quantity$/i.test(t));
+      const hasAmount = headerTexts.some((t) => /^amount$/i.test(t));
+      const hasGst = headerTexts.some((t) => /^gst$/i.test(t));
+
+      if (hasProduct && hasQty && hasAmount && hasGst) {
         return table;
       }
     }
     return null;
+  }
+
+  function buildHeaderIndexMap(table) {
+    const headers = Array.from(table.querySelectorAll("thead th"));
+    const map = {};
+
+    headers.forEach((th, index) => {
+      const label = normalizeText(th.textContent).toLowerCase();
+
+      if (/^#$/.test(label)) map.lineNo = index;
+      else if (/product\s*\/?\s*service/.test(label)) map.product = index;
+      else if (/^sku$/.test(label)) map.sku = index;
+      else if (/^description$/.test(label)) map.description = index;
+      else if (/^qty$/.test(label) || /^quantity$/.test(label)) map.qty = index;
+      else if (/^rate$/.test(label)) map.rate = index;
+      else if (/^amount$/.test(label)) map.amount = index;
+      else if (/^gst$/.test(label)) map.gst = index;
+    });
+
+    return map;
   }
 
   function extractHeaderData(root) {
@@ -127,7 +158,8 @@
     const invoiceNumber =
       getElementValue(root.querySelector('input[aria-label*="Invoice no"]')) ||
       getElementValue(root.querySelector('input[aria-label*="Invoice number"]')) ||
-      (text.match(/\bInvoice\s+(\d{2,})\b/i)?.[1] ?? "N/A");
+      (text.match(/\bInvoice\s+no\.?\s*([0-9A-Za-z-]+)/i)?.[1] ?? "") ||
+      (text.match(/\bInvoice\s+([0-9A-Za-z-]+)/i)?.[1] ?? "N/A");
 
     const invoiceDate =
       getElementValue(root.querySelector('input[aria-label*="Invoice date"]')) ||
@@ -165,13 +197,24 @@
   function extractRows(root) {
     const table = findInvoiceTable(root);
     if (!table) {
-      log("Invoice table not found.");
+      warn("Invoice table not found.");
       return [];
     }
 
-    const tbody = table.querySelector('tbody[data-smart-table-body="true"]') || table.querySelector("tbody");
+    const headerMap = buildHeaderIndexMap(table);
+    log("Header map:", headerMap);
+
+    if (headerMap.product == null || headerMap.qty == null) {
+      warn("Required columns not found in table header.");
+      return [];
+    }
+
+    const tbody =
+      table.querySelector('tbody[data-smart-table-body="true"]') ||
+      table.querySelector("tbody");
+
     if (!tbody) {
-      log("Invoice tbody not found.");
+      warn("Invoice tbody not found.");
       return [];
     }
 
@@ -181,40 +224,25 @@
     const rows = [];
 
     for (const tr of rowEls) {
-      const cells = Array.from(tr.querySelectorAll('td[role="gridcell"], td, [role="cell"]'));
+      const cells = Array.from(tr.querySelectorAll('td[role="cell"], td[role="gridcell"], td'));
       if (!cells.length) continue;
 
-      const texts = cells.map((c) => normalizeText(c.textContent));
+      const texts = cells.map((cell) => normalizeText(cell.textContent));
 
-      // New UI structure from uploaded markup:
-      // 0 drag handle
-      // 1 line number
-      // 2 product/service
-      // 3 description
-      // 4 qty
-      // 5 rate
-      // 6 amount
-      // 7 GST
-      // 8 delete/options
-      const productName = texts[2] || "";
-      const description = texts[3] || "";
-      const quantity = tryParseNumber(texts[4]) ?? 0;
+      const productName = headerMap.product != null ? (texts[headerMap.product] || "") : "";
+      const sku = headerMap.sku != null ? (texts[headerMap.sku] || "") : "";
+      const description = headerMap.description != null ? (texts[headerMap.description] || "") : "";
+      const quantity = headerMap.qty != null ? (tryParseNumber(texts[headerMap.qty]) ?? 0) : 0;
 
-      // Optional SKU support if QuickBooks ever renders it in product cell text
-      let sku = "";
-      const skuMatch = productName.match(/\b[A-Z0-9][A-Z0-9\-\/]{2,}\b$/);
-      if (skuMatch) {
-        sku = skuMatch[0];
-      }
-
-      // Skip blank add-new row
-      if (!productName && !description && quantity === 0) continue;
+      // Skip false reads like line numbers only
+      if (!productName && !sku && !description) continue;
+      if (/^\d+$/.test(productName) && !sku && !description) continue;
 
       rows.push({
-        key: `${productName}|${description}|${quantity}`,
+        key: `${productName}|${sku}|${description}|${quantity}`,
         productName,
-        description,
         sku,
+        description,
         quantity,
       });
     }
@@ -234,8 +262,8 @@
     return JSON.stringify(
       rows.map((r) => ({
         productName: r.productName,
-        description: r.description,
         sku: r.sku,
+        description: r.description,
         quantity: r.quantity,
       }))
     );
@@ -349,7 +377,7 @@
         const qty = Number(row.quantity || 0);
 
         if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) return;
-        if (!row.productName && qty === 0) return;
+        if (!row.productName && !row.sku && qty === 0) return;
 
         const groupKey = row.sku
           ? `SKU:${row.sku}`

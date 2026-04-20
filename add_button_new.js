@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (Stable + Safer)
 // @namespace    http://tampermonkey.net/
-// @version      3.5
-// @description  Adds Print and Pick Slip buttons to QuickBooks invoices with safer quantity handling and stable extraction
+// @version      3.6
+// @description  Adds Print and Pick Slip buttons to QuickBooks invoices with broader UI support
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -15,26 +15,21 @@
 
   const CONFIG = {
     buttonCheckIntervalMs: 2000,
-    mutationDebounceMs: 500,
-    initialBootDelayMs: 1800,
-    stableReadAttempts: 6,
-    stableReadDelayMs: 250,
+    mutationDebounceMs: 700,
+    initialBootDelayMs: 2500,
+    stableReadAttempts: 7,
+    stableReadDelayMs: 350,
     debug: true,
   };
 
   const STATE = {
-    currentInvoiceId: null,
     addButtonsInFlight: false,
     mutationTimer: null,
-    lastUrl: location.href,
+    currentInvoiceId: null,
   };
 
   function log(...args) {
     if (CONFIG.debug) console.log("[QBO Pick Slip]", ...args);
-  }
-
-  function warn(...args) {
-    console.warn("[QBO Pick Slip]", ...args);
   }
 
   function sleep(ms) {
@@ -73,74 +68,100 @@
   }
 
   function isInvoicePage() {
-    const url = window.location.href;
-    return (
-      url.includes("qbo.intuit.com/app/invoice") ||
-      url.includes("/app/invoice?") ||
-      url.includes("/invoice?txnId") ||
-      url.includes("/invoice")
-    );
+    const url = location.href;
+    return url.includes("/invoice") || url.includes("txnId=");
   }
 
   function getInvoiceId() {
-    const match = window.location.href.match(/[?&]txnId=([^&]+)/);
+    const match = location.href.match(/[?&]txnId=([^&]+)/);
     return match ? decodeURIComponent(match[1]) : null;
   }
 
   function getInvoiceRoot() {
-    const candidates = [
-      document.querySelector(".trowser-view .body"),
-      document.querySelector('[data-automation-id="invoice-form"]'),
-      document.querySelector('[data-automation-id="invoice-editor"]'),
-      document.querySelector(".invoice-content"),
-      document.querySelector("#qbo-main"),
-      document.querySelector("#app"),
-      document.body,
-    ].filter(Boolean);
+    const selectors = [
+      ".trowser-view .body",
+      '[data-automation-id="invoice-form"]',
+      '[data-automation-id="invoice-editor"]',
+      '[data-testid*="invoice"]',
+      '[class*="invoice"]',
+      "#qbo-main",
+      "#app",
+      "main",
+      "body",
+    ];
 
-    for (const c of candidates) {
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+
+      const text = el.textContent || "";
       if (
-        c.querySelector(".dgrid-row") ||
-        c.querySelector('[data-qbo-bind="text: referenceNumber"]') ||
-        c.querySelector("textarea.topFieldInput.address") ||
-        c.querySelector("#shippingAddress") ||
-        c.querySelector(".custom-form")
+        text.includes("Receive payment") ||
+        text.includes("BALANCE DUE") ||
+        text.includes("Amounts are") ||
+        text.includes("ORDER NUMBER") ||
+        text.includes("JOB NAME") ||
+        text.includes("Invoice")
       ) {
-        return c;
+        return el;
       }
     }
 
-    return null;
+    return document.body;
   }
 
   function isInvoiceEditorOpen() {
-    return !!getInvoiceRoot();
+    return isInvoicePage() && !!getInvoiceRoot();
   }
 
-  function getRowElements(root) {
-    if (!root) return [];
-    return Array.from(root.querySelectorAll(".dgrid-row"));
+  function getProductNameOld(row) {
+    const selectors = [
+      ".itemColumn",
+      '[data-automation-id="item-name"]',
+      ".itemName",
+      '[data-testid*="item"]',
+    ];
+    for (const selector of selectors) {
+      const el = row.querySelector(selector);
+      const value = normalizeText(getElementValue(el));
+      if (value) return value;
+    }
+    return "";
   }
 
-  function getSKU(row) {
+  function getDescriptionOld(row) {
+    const selectors = [
+      ".field-description div",
+      ".field-description",
+      '[data-automation-id="description"]',
+      ".description-field",
+    ];
+    for (const selector of selectors) {
+      const el = row.querySelector(selector);
+      const value = normalizeText(getElementValue(el));
+      if (value) return value;
+    }
+    return "";
+  }
+
+  function getSKUOld(row) {
     const selectors = [
       ".field-sku",
       '[data-automation-id="sku"]',
       ".sku-field",
       ".itemSKU",
       '[aria-label*="SKU"]',
+      '[data-testid*="sku"]',
     ];
-
     for (const selector of selectors) {
       const el = row.querySelector(selector);
       const value = normalizeText(getElementValue(el));
       if (value) return value;
     }
-
     return "";
   }
 
-  function getQuantity(row) {
+  function getQuantityOld(row) {
     const selectors = [
       ".field-quantity-inner",
       '[data-automation-id="quantity"]',
@@ -148,14 +169,13 @@
       ".field-qty",
       'input[aria-label*="Quantity"]',
       'input[name*="quantity"]',
+      '[data-testid*="quantity"]',
     ];
 
     for (const selector of selectors) {
       const el = row.querySelector(selector);
       if (!el) continue;
-
-      const value = getElementValue(el);
-      const parsed = tryParseNumber(value);
+      const parsed = tryParseNumber(getElementValue(el));
       if (parsed != null) return parsed;
     }
 
@@ -179,136 +199,185 @@
     return 0;
   }
 
-  function getProductName(row) {
-    const selectors = [
-      ".itemColumn",
-      '[data-automation-id="item-name"]',
-      ".itemName",
-    ];
-
-    for (const selector of selectors) {
-      const el = row.querySelector(selector);
-      const value = normalizeText(getElementValue(el));
-      if (value) return value;
-    }
-
-    return "";
-  }
-
-  function getDescription(row) {
-    const selectors = [
-      ".field-description div",
-      ".field-description",
-      '[data-automation-id="description"]',
-      ".description-field",
-    ];
-
-    for (const selector of selectors) {
-      const el = row.querySelector(selector);
-      const value = normalizeText(getElementValue(el));
-      if (value) return value;
-    }
-
-    return "";
+  function isHeaderOnlyRow(productName, description, sku, quantity) {
+    const text = (productName || description || "").trim();
+    if (sku) return false;
+    if (Number(quantity || 0) !== 0) return false;
+    if (!text) return true;
+    if (/^\*+\s*.+?\s*\*+$/.test(text)) return true;
+    return false;
   }
 
   function extractHeaderData(root) {
-    const data = {
+    const text = root?.textContent || "";
+
+    const invoiceNumber =
+      normalizeText(getElementValue(root.querySelector('[data-qbo-bind="text: referenceNumber"]'))) ||
+      (text.match(/Invoice no\.?\s*([A-Za-z0-9-]+)/i)?.[1] ?? "N/A");
+
+    return {
       billingAddress: getElementValue(root.querySelector("textarea.topFieldInput.address")) || "N/A",
       shippingAddress: getElementValue(root.querySelector("#shippingAddress")) || "N/A",
-      invoiceNumber:
-        normalizeText(getElementValue(root.querySelector('[data-qbo-bind="text: referenceNumber"]'))) || "N/A",
+      invoiceNumber,
       invoiceDate: getElementValue(root.querySelector(".dijitDateTextBox input.dijitInputInner")) || "N/A",
       orderNumber: "",
       jobName: "",
       phoneNumber: "",
     };
+  }
 
-    const formElement = root.querySelector(".custom-form");
-    if (formElement) {
-      const formFields = Array.from(formElement.querySelectorAll(".custom-form-field"));
+  function extractRowsFromOldUI(root) {
+    const rowElements = Array.from(root.querySelectorAll(".dgrid-row"));
+    const rows = [];
 
-      const findFieldValue = (labelText) => {
-        const field = formFields.find((f) => {
-          const label = normalizeText(f.querySelector("label")?.textContent);
-          return label.toLowerCase() === labelText.toLowerCase();
+    rowElements.forEach((row) => {
+      const productName = getProductNameOld(row);
+      const description = getDescriptionOld(row);
+      const sku = getSKUOld(row);
+      const quantity = getQuantityOld(row);
+
+      if (!productName && !description && !sku) return;
+
+      rows.push({
+        key: sku || productName || description,
+        productName,
+        description,
+        sku,
+        quantity,
+      });
+    });
+
+    return rows;
+  }
+
+  function scoreHeader(text) {
+    const t = normalizeText(text).toLowerCase();
+
+    if (!t) return null;
+    if (t.includes("product") || t.includes("service") || t === "item") return "product";
+    if (t === "sku" || t.includes("sku")) return "sku";
+    if (t === "quantity" || t === "qty" || t.includes("quantity")) return "quantity";
+    if (t.includes("description")) return "description";
+    return null;
+  }
+
+  function extractRowsFromGenericGrid(root) {
+    const tables = Array.from(root.querySelectorAll("table"));
+    const results = [];
+
+    for (const table of tables) {
+      const headerCells = Array.from(table.querySelectorAll("thead th, tr th"));
+      if (!headerCells.length) continue;
+
+      const headerMap = {};
+      headerCells.forEach((cell, idx) => {
+        const role = scoreHeader(cell.textContent);
+        if (role) headerMap[role] = idx;
+      });
+
+      if (headerMap.product == null && headerMap.sku == null && headerMap.quantity == null) {
+        continue;
+      }
+
+      const bodyRows = Array.from(table.querySelectorAll("tbody tr, tr")).filter((tr) => tr.querySelectorAll("td").length);
+      for (const tr of bodyRows) {
+        const cells = Array.from(tr.querySelectorAll("td"));
+        if (!cells.length) continue;
+
+        const productName = headerMap.product != null ? normalizeText(cells[headerMap.product]?.textContent) : "";
+        const description = headerMap.description != null ? normalizeText(cells[headerMap.description]?.textContent) : "";
+        const sku = headerMap.sku != null ? normalizeText(cells[headerMap.sku]?.textContent) : "";
+        const quantity = headerMap.quantity != null ? (tryParseNumber(cells[headerMap.quantity]?.textContent) ?? 0) : 0;
+
+        if (!productName && !description && !sku) continue;
+
+        results.push({
+          key: sku || productName || description,
+          productName,
+          description,
+          sku,
+          quantity,
         });
-        return field ? getElementValue(field.querySelector("input")) : "";
-      };
+      }
 
-      data.orderNumber = findFieldValue("ORDER NUMBER");
-      data.jobName = findFieldValue("JOB NAME");
-      data.phoneNumber = findFieldValue("Phone");
+      if (results.length) return results;
     }
 
-    return data;
+    return [];
   }
 
-  function isHeaderOnlyRow(productName, description, sku, quantity) {
-    const text = (productName || description || "").trim();
+  function extractRowsFromColumnIdGrid(root) {
+    const rows = Array.from(root.querySelectorAll('tr, [role="row"]'));
+    const results = [];
 
-    // No SKU + zero qty + looks like a section heading
-    if (sku) return false;
-    if (Number(quantity || 0) !== 0) return false;
-    if (!text) return true;
+    for (const row of rows) {
+      const productCell =
+        row.querySelector('[data-column-id="productName"]') ||
+        row.querySelector('[data-column-id="productService"]') ||
+        row.querySelector('[data-column-id="itemName"]') ||
+        row.querySelector('[data-column-id="name"]');
 
-    // Matches rows like ** Kitchen **, ** WC **, ** Ensuite **
-    if (/^\*+\s*.+?\s*\*+$/.test(text)) return true;
+      const skuCell =
+        row.querySelector('[data-column-id="sku"]') ||
+        row.querySelector('[data-column-id="itemSku"]');
 
-    // Optional: also skip very short all-text labels with no SKU and no qty
-    // Uncomment only if needed:
-    // if (!sku && Number(quantity || 0) === 0 && text.length <= 40) return true;
+      const qtyCell =
+        row.querySelector('[data-column-id="quantity"]') ||
+        row.querySelector('[data-column-id="qty"]');
 
-    return false;
+      const descCell =
+        row.querySelector('[data-column-id="description"]');
+
+      const productName = normalizeText(getElementValue(productCell));
+      const description = normalizeText(getElementValue(descCell));
+      const sku = normalizeText(getElementValue(skuCell));
+      const quantity = tryParseNumber(getElementValue(qtyCell)) ?? 0;
+
+      if (!productName && !description && !sku) continue;
+
+      results.push({
+        key: sku || productName || description,
+        productName,
+        description,
+        sku,
+        quantity,
+      });
+    }
+
+    return results;
   }
 
-  function extractRows(root) {
-  const rowElements = getRowElements(root);
-  const rows = [];
+  function extractRows() {
+    const root = getInvoiceRoot();
 
-  rowElements.forEach((row) => {
-    const productName = getProductName(row);
-    const description = getDescription(row);
-    const sku = getSKU(row);
-    const quantity = getQuantity(row);
+    let rows = extractRowsFromOldUI(root);
+    if (rows.length) {
+      log("Rows found using old UI selectors:", rows.length);
+      return rows;
+    }
 
-    const displayText = productName || description || "";
+    rows = extractRowsFromColumnIdGrid(root);
+    if (rows.length) {
+      log("Rows found using data-column-id grid:", rows.length);
+      return rows;
+    }
 
-    // Skip only truly empty rows
-    if (!productName && !description && !sku) return;
+    rows = extractRowsFromGenericGrid(root);
+    if (rows.length) {
+      log("Rows found using generic table/grid:", rows.length);
+      return rows;
+    }
 
-    rows.push({
-      key: sku || productName || description,
-      productName,
-      description,
-      sku,
-      quantity,
-      displayText,
-    });
-  });
-
-  return rows;
-}
+    log("No rows found with current selectors.");
+    return [];
+  }
 
   function extractData() {
     const root = getInvoiceRoot();
 
-    if (!root) {
-      return {
-        billingAddress: "N/A",
-        shippingAddress: "N/A",
-        invoiceNumber: "N/A",
-        invoiceDate: "N/A",
-        orderNumber: "",
-        jobName: "",
-        phoneNumber: "",
-        rows: [],
-      };
-    }
-
     return {
       ...extractHeaderData(root),
-      rows: extractRows(root),
+      rows: extractRows(),
     };
   }
 
@@ -349,33 +418,19 @@
     button.textContent = text;
     button.style.cssText = `
       position: fixed;
-      bottom: 5px;
+      bottom: 10px;
       left: ${left};
-      padding: 2px 23px;
+      padding: 10px 18px;
       background-color: #2ca01c;
       color: white;
       border: none;
-      border-radius: 5px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
       cursor: pointer;
       font-size: 14px;
       font-weight: 600;
-      z-index: 10000;
-      transition: all 0.2s ease;
+      z-index: 999999;
     `;
-
-    button.addEventListener("mouseenter", () => {
-      button.style.backgroundColor = "#248f17";
-      button.style.transform = "translateY(-2px)";
-      button.style.boxShadow = "0 4px 12px rgba(0,0,0,0.12)";
-    });
-
-    button.addEventListener("mouseleave", () => {
-      button.style.backgroundColor = "#2ca01c";
-      button.style.transform = "translateY(0)";
-      button.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
-    });
-
     button.addEventListener("click", clickHandler);
     return button;
   }
@@ -390,12 +445,7 @@
     STATE.addButtonsInFlight = true;
 
     try {
-      if (!isInvoicePage()) {
-        removeButtons();
-        return;
-      }
-
-      if (!isInvoiceEditorOpen()) {
+      if (!isInvoicePage() || !isInvoiceEditorOpen()) {
         removeButtons();
         return;
       }
@@ -427,94 +477,103 @@
   }
 
   function buildProductTable(rows, combineQuantities) {
-  if (!rows.length) return "<p>No valid products found.</p>";
+    if (!rows.length) return "<p>No valid products found.</p>";
 
-  let html = "";
+    let html = "";
 
-  if (combineQuantities) {
-    const grouped = new Map();
+    if (combineQuantities) {
+      const grouped = new Map();
 
-    rows.forEach((row) => {
-      const text = (row.productName || row.description || "").trim();
-      const qty = Number(row.quantity || 0);
+      rows.forEach((row) => {
+        const qty = Number(row.quantity || 0);
 
-      // Skip section/header rows only for Pick Slip
-      if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) {
-        return;
-      }
+        if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) return;
+        if (!row.sku && qty === 0) return;
 
-      // Skip invalid non-item rows in Pick Slip
-      if (!row.sku && qty === 0) {
-        return;
-      }
+        const groupKey = row.sku ? `SKU:${row.sku}` : `NAME:${row.productName || row.description}`;
 
-      const groupKey = row.sku ? `SKU:${row.sku}` : `NAME:${row.productName || row.description}`;
+        if (!grouped.has(groupKey)) {
+          grouped.set(groupKey, {
+            productName: row.productName || row.description || "",
+            sku: row.sku || "",
+            quantity: qty,
+          });
+        } else {
+          grouped.get(groupKey).quantity += qty;
+        }
+      });
 
-      if (!grouped.has(groupKey)) {
-        grouped.set(groupKey, {
-          productName: row.productName || row.description || "",
-          sku: row.sku || "",
-          quantity: qty,
-        });
-      } else {
-        grouped.get(groupKey).quantity += qty;
-      }
-    });
-
-    grouped.forEach((value) => {
-      html += `
-        <tr style="height:30px;">
-          <td>${escapeHtml(value.productName)}</td>
-          <td>${escapeHtml(value.sku)}</td>
-          <td style="text-align:right;">${escapeHtml(value.quantity)}</td>
-        </tr>
-      `;
-    });
-  } else {
-    // Print mode: keep empty/header line items
-    rows.forEach((row) => {
-      const displayName = row.productName || (row.sku ? "" : row.description);
-
-      if (displayName || row.sku) {
+      grouped.forEach((value) => {
         html += `
-          <tr style="height:30px;">
-            <td>${escapeHtml(displayName)}</td>
-            <td>${escapeHtml(row.sku)}</td>
-            <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
+          <tr>
+            <td>${escapeHtml(value.productName)}</td>
+            <td>${escapeHtml(value.sku)}</td>
+            <td style="text-align:right;">${escapeHtml(value.quantity)}</td>
           </tr>
         `;
-      }
-    });
+      });
+    } else {
+      rows.forEach((row) => {
+        const displayName = row.productName || (row.sku ? "" : row.description);
+        if (displayName || row.sku) {
+          html += `
+            <tr>
+              <td>${escapeHtml(displayName)}</td>
+              <td>${escapeHtml(row.sku)}</td>
+              <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
+            </tr>
+          `;
+        }
+      });
+    }
+
+    if (!html) return "<p>No valid products found.</p>";
+
+    return `
+      <table class="product-table">
+        <thead>
+          <tr>
+            <th>Product Name</th>
+            <th>SKU</th>
+            <th>Quantity</th>
+          </tr>
+        </thead>
+        <tbody>${html}</tbody>
+      </table>
+    `;
   }
-
-  if (!html) return "<p>No valid products found.</p>";
-
-  return `
-    <table class="product-table">
-      <thead style="background:lightgrey;">
-        <tr>
-          <th>Product Name</th>
-          <th>SKU</th>
-          <th>Quantity</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${html}
-      </tbody>
-    </table>
-  `;
-}
 
   async function generateProductTable(combineQuantities) {
     const data = await getStableExtractedData();
 
     if (!data.rows.length) {
-      alert("No product data found. Please ensure the invoice is fully loaded.");
+      alert("No product rows found in the current QuickBooks UI. Open DevTools and check console logs starting with [QBO Pick Slip].");
       return;
     }
 
     const productTable = buildProductTable(data.rows, combineQuantities);
-    const printLayout = generatePrintLayout(data, productTable);
+
+    const printLayout = `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Invoice ${escapeHtml(data.invoiceNumber)}</title>
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; }
+.product-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+.product-table th, .product-table td { padding: 8px; border-bottom: 1px solid #ddd; text-align: left; }
+.product-table td:last-child { text-align: right; }
+</style>
+</head>
+<body>
+<h3>Delivery Note</h3>
+<div><b>Invoice No:</b> ${escapeHtml(data.invoiceNumber)}</div>
+<div><b>Date:</b> ${escapeHtml(data.invoiceDate)}</div>
+<div style="margin-top:20px;">${productTable}</div>
+</body>
+</html>
+    `;
 
     const newWindow = window.open("", "_blank", "width=900,height=700");
     if (!newWindow) {
@@ -533,105 +592,6 @@
     };
   }
 
-  function generatePrintLayout(data, productTable) {
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Invoice ${escapeHtml(data.invoiceNumber)}</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; }
-    .maincontainer { width: 100%; padding: 20px; margin: 0 auto; line-height: 1.4; }
-    .maincontainer h3 { margin-top: 0; margin-bottom: 0; }
-    .ContactService textarea { line-height: 1.65; margin-bottom: -5px; }
-    .TMheader { width: 100%; display: flex; justify-content: space-between; margin-bottom: 0px; }
-    .TMheader-left { width: 70%; display: flex; font-size: 13px; gap: 20px; }
-    .TMheader-left img { max-width: 150px; height: auto; }
-    .TMheader-right { width: 30%; font-size: 10px; }
-    .deliveryNote { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 13px; width: 100%; }
-    .deliveryNote p { margin-bottom: 0; }
-    .deliveryNote > div { width: 33.3%; white-space: pre-line; }
-    .orderProducts { margin-top: 20px; border-top: 1px solid #000; }
-    .product-table { text-align: left; width: 100%; margin-top: 20px; font-size: 14px; border-collapse: collapse; }
-    .product-table th { padding: 8px; text-align: left; }
-    .product-table td { padding: 6px; }
-    .product-table tbody tr td:last-child { text-align: right; }
-    .orderNote { display: flex; justify-content: space-between; font-size: 14px; margin: 12px 0; }
-    .input-group { display: flex; justify-content: space-between; margin-top: 20px; font-size: 12px; }
-    hr { border: none; border-top: 1px solid #ccc; margin: 10px 0; }
-    @media print { body { margin: 0; } .maincontainer { padding: 15px; } }
-  </style>
-</head>
-<body>
-  <div class="maincontainer">
-    <div class="TMheader">
-      <div class="TMheader-left">
-        <div class="imageLogo">
-          <img src="https://c17.qbo.intuit.com/qbo17/ext/Image/show/249862794341519/1?14857441280001" alt="Logo" />
-        </div>
-        <div class="CompanyInfo">
-          <div><b>Adelaide Bathroom & Kitchen Supplies</b></div>
-          <div>2/831 Lower North East Rd, Dernancourt</div>
-          <div>(08) 7006 5181</div>
-          <div>Sales@abksupplies.com.au</div>
-          <div>ABN 13 695 032 804</div>
-        </div>
-      </div>
-      <div class="TMheader-right">
-        <div class="ContactService">
-          <div><b>Received In Good Order & Condition</b></div>
-          <div><textarea rows="1" style="height:30px;width:200px;" placeholder="Name:"></textarea></div>
-          <div><textarea rows="1" style="height:40px;width:200px;" placeholder="Sign:"></textarea></div>
-          <div><textarea rows="1" style="height:30px;width:200px;" placeholder="Date: __ / __ / ____"></textarea></div>
-        </div>
-      </div>
-    </div>
-
-    <h3 style="margin-bottom:10px">Delivery Note</h3>
-
-    <div class="deliveryNote">
-      <div>
-        <b>INVOICE TO</b>
-        <p>${escapeHtml(data.billingAddress)}</p>
-      </div>
-      <div>
-        <b>SHIP TO</b>
-        <p>${escapeHtml(data.shippingAddress)}</p>
-      </div>
-      <div>
-        <b>INVOICE NO.:</b>
-        <span>${escapeHtml(data.invoiceNumber)}</span><br/>
-        <b>DATE:</b>
-        <span>${escapeHtml(data.invoiceDate)}</span>
-      </div>
-    </div>
-
-    <hr>
-
-    <div class="orderNote">
-      <div><b>ORDER NUMBER</b><br/>${escapeHtml(data.orderNumber)}</div>
-      <div><b>JOB NAME</b><br/>${escapeHtml(data.jobName)}</div>
-      <div><b>PHONE</b><br/>${escapeHtml(data.phoneNumber)}</div>
-    </div>
-
-    <div class="orderProducts">
-      ${productTable}
-    </div>
-
-    <hr/>
-
-    <div class="input-group">
-      <span>Picked By: _______________</span>
-      <span>Checked By: _______________</span>
-    </div>
-  </div>
-</body>
-</html>
-    `;
-  }
-
   function refreshButtons() {
     clearTimeout(STATE.mutationTimer);
     STATE.mutationTimer = setTimeout(() => {
@@ -644,6 +604,13 @@
     const originalPushState = history.pushState;
     history.pushState = function () {
       const result = originalPushState.apply(this, arguments);
+      setTimeout(refreshButtons, 500);
+      return result;
+    };
+
+    const originalReplaceState = history.replaceState;
+    history.replaceState = function () {
+      const result = originalReplaceState.apply(this, arguments);
       setTimeout(refreshButtons, 500);
       return result;
     };

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.6
-// @description  Print / Pick Slip for QuickBooks invoice editor using exact field selectors and header-mapped columns
+// @version      5.7
+// @description  Print / Pick Slip for QuickBooks invoice editor using exact field selectors and header-mapped column
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -497,7 +497,7 @@
     .TMheader-right { width: 30%; font-size: 10px; }
     .deliveryNote { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 13px; width: 100%; }
     .deliveryNote p { margin-bottom: 0; white-space: pre-line; }
-    .deliveryNote > div { width: 33.3%; white-space: pre-line; }
+    .deliveryNote > div { width: 33.3%; white-space: pre-line; padding-right: 15px; }
     .orderProducts { margin-top: 20px; border-top: 1px solid #000; }
     .product-table { text-align: left; width: 100%; margin-top: 20px; font-size: 14px; border-collapse: collapse; }
     .product-table th { padding: 8px; text-align: left; }

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.9
-// @description  Print / Pick Slip for QuickBooks invoice editor using exact field selectors and header-mapped column and spaces
+// @version      6.0
+// @description  Print / Pick Slip for QuickBooks invoice fixes
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*

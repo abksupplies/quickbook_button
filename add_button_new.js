@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.1
-// @description  Reliable Print / Pick Slip for the new QuickBooks invoice table UI
+// @version      5.2
+// @description  Print / Pick Slip for new QuickBooks invoice editor
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -98,10 +98,7 @@
 
     for (const root of roots) {
       const text = root.textContent || "";
-      if (
-        text.includes("Product or service") ||
-        text.includes("Product/service")
-      ) {
+      if (text.includes("Product/service") || text.includes("Product or service")) {
         return root;
       }
     }
@@ -121,11 +118,10 @@
       );
 
       const hasProduct = headerTexts.some((t) => /product\s*\/?\s*service/i.test(t));
+      const hasDescription = headerTexts.some((t) => /^description$/i.test(t));
       const hasQty = headerTexts.some((t) => /^qty$/i.test(t) || /^quantity$/i.test(t));
-      const hasAmount = headerTexts.some((t) => /^amount$/i.test(t));
-      const hasGst = headerTexts.some((t) => /^gst$/i.test(t));
 
-      if (hasProduct && hasQty && hasAmount && hasGst) {
+      if (hasProduct && hasDescription && hasQty) {
         return table;
       }
     }
@@ -139,14 +135,14 @@
     headers.forEach((th, index) => {
       const label = normalizeText(th.textContent).toLowerCase();
 
-      if (/^#$/.test(label)) map.lineNo = index;
+      if (label === "#") map.lineNo = index;
       else if (/product\s*\/?\s*service/.test(label)) map.product = index;
-      else if (/^sku$/.test(label)) map.sku = index;
-      else if (/^description$/.test(label)) map.description = index;
-      else if (/^qty$/.test(label) || /^quantity$/.test(label)) map.qty = index;
-      else if (/^rate$/.test(label)) map.rate = index;
-      else if (/^amount$/.test(label)) map.amount = index;
-      else if (/^gst$/.test(label)) map.gst = index;
+      else if (label === "sku") map.sku = index;
+      else if (label === "description") map.description = index;
+      else if (label === "qty" || label === "quantity") map.qty = index;
+      else if (label === "rate") map.rate = index;
+      else if (label === "amount") map.amount = index;
+      else if (label === "gst") map.gst = index;
     });
 
     return map;
@@ -158,8 +154,8 @@
     const invoiceNumber =
       getElementValue(root.querySelector('input[aria-label*="Invoice no"]')) ||
       getElementValue(root.querySelector('input[aria-label*="Invoice number"]')) ||
-      (text.match(/\bInvoice\s+no\.?\s*([0-9A-Za-z-]+)/i)?.[1] ?? "") ||
-      (text.match(/\bInvoice\s+([0-9A-Za-z-]+)/i)?.[1] ?? "N/A");
+      (text.match(/\bInvoice\s+no\.?\s*([0-9]{3,})\b/i)?.[1] ?? "") ||
+      (text.match(/\bInvoice\s+([0-9]{3,})\b/i)?.[1] ?? "N/A");
 
     const invoiceDate =
       getElementValue(root.querySelector('input[aria-label*="Invoice date"]')) ||
@@ -194,6 +190,11 @@
     return false;
   }
 
+  function getCellTextByCapability(row, capabilityName) {
+    const selector = `td[class*="${capabilityName}"], [role="cell"][class*="${capabilityName}"]`;
+    return normalizeText(getElementValue(row.querySelector(selector)));
+  }
+
   function extractRows(root) {
     const table = findInvoiceTable(root);
     if (!table) {
@@ -203,11 +204,6 @@
 
     const headerMap = buildHeaderIndexMap(table);
     log("Header map:", headerMap);
-
-    if (headerMap.product == null || headerMap.qty == null) {
-      warn("Required columns not found in table header.");
-      return [];
-    }
 
     const tbody =
       table.querySelector('tbody[data-smart-table-body="true"]') ||
@@ -229,13 +225,37 @@
 
       const texts = cells.map((cell) => normalizeText(cell.textContent));
 
-      const productName = headerMap.product != null ? (texts[headerMap.product] || "") : "";
-      const sku = headerMap.sku != null ? (texts[headerMap.sku] || "") : "";
-      const description = headerMap.description != null ? (texts[headerMap.description] || "") : "";
-      const quantity = headerMap.qty != null ? (tryParseNumber(texts[headerMap.qty]) ?? 0) : 0;
+      // Preferred: capability-based extraction
+      let productName =
+        getCellTextByCapability(tr, "ItemProductService") ||
+        "";
 
-      // Skip false reads like line numbers only
+      let sku =
+        getCellTextByCapability(tr, "ItemSku") ||
+        getCellTextByCapability(tr, "ItemSKU") ||
+        "";
+
+      let description =
+        getCellTextByCapability(tr, "ItemDescription") ||
+        "";
+
+      let quantityRaw =
+        getCellTextByCapability(tr, "ItemQty") ||
+        getCellTextByCapability(tr, "ItemQuantity") ||
+        "";
+
+      // Fallback to header map if capability selectors not found
+      if (!productName && headerMap.product != null) productName = texts[headerMap.product] || "";
+      if (!sku && headerMap.sku != null) sku = texts[headerMap.sku] || "";
+      if (!description && headerMap.description != null) description = texts[headerMap.description] || "";
+      if (!quantityRaw && headerMap.qty != null) quantityRaw = texts[headerMap.qty] || "";
+
+      const quantity = tryParseNumber(quantityRaw) ?? 0;
+
+      // Skip blank rows
       if (!productName && !sku && !description) continue;
+
+      // Guard against line-number or pure numeric misreads
       if (/^\d+$/.test(productName) && !sku && !description) continue;
 
       rows.push({
@@ -247,6 +267,7 @@
       });
     }
 
+    log("Extracted rows:", rows);
     return rows;
   }
 
@@ -376,6 +397,7 @@
       rows.forEach((row) => {
         const qty = Number(row.quantity || 0);
 
+        // Pick Slip: remove header-only rows
         if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) return;
         if (!row.productName && !row.sku && qty === 0) return;
 
@@ -404,6 +426,7 @@
         `;
       });
     } else {
+      // Print: keep section/header rows
       rows.forEach((row) => {
         const displayName = row.productName || (row.sku ? "" : row.description);
 

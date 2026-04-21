@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.3
-// @description  Print / Pick Slip for new QuickBooks invoice editor using visual column mapping
+// @version      5.4
+// @description  Print / Pick Slip for the new QuickBooks invoice editor using exact table columns
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -17,7 +17,7 @@
     buttonCheckIntervalMs: 2000,
     mutationDebounceMs: 500,
     initialBootDelayMs: 2200,
-    stableReadAttempts: 8,
+    stableReadAttempts: 6,
     stableReadDelayMs: 250,
     debug: true,
   };
@@ -55,12 +55,10 @@
 
   function getElementValue(el) {
     if (!el) return "";
-    if (typeof el.value === "string" && el.value.trim()) return el.value.trim();
+    if (typeof el.value === "string") return el.value.trim();
     const attrValue = el.getAttribute?.("value");
-    if (typeof attrValue === "string" && attrValue.trim()) return attrValue.trim();
-    const text = el.textContent;
-    if (typeof text === "string" && text.trim()) return text.trim();
-    return "";
+    if (typeof attrValue === "string") return attrValue.trim();
+    return normalizeText(el.textContent || "");
   }
 
   function tryParseNumber(raw) {
@@ -72,18 +70,6 @@
     if (!text) return null;
     const value = Number(text);
     return Number.isFinite(value) ? value : null;
-  }
-
-  function isVisible(el) {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-  }
-
-  function getCenterX(el) {
-    const rect = el.getBoundingClientRect();
-    return rect.left + rect.width / 2;
   }
 
   function isInvoicePage() {
@@ -110,7 +96,7 @@
 
     for (const root of roots) {
       const text = root.textContent || "";
-      if (text.includes("Product/service") || text.includes("Product or service")) {
+      if (text.includes("Product/service") && text.includes("Description")) {
         return root;
       }
     }
@@ -125,69 +111,57 @@
   function findInvoiceTable(root) {
     const tables = Array.from(root.querySelectorAll("table"));
     for (const table of tables) {
-      const headerTexts = Array.from(table.querySelectorAll("thead th")).map((th) =>
-        normalizeText(th.textContent)
-      );
-
-      const hasProduct = headerTexts.some((t) => /product\s*\/?\s*service/i.test(t));
-      const hasQty = headerTexts.some((t) => /^qty$/i.test(t) || /^quantity$/i.test(t));
-      if (hasProduct && hasQty) {
+      const headerText = normalizeText(table.querySelector("thead")?.textContent || "");
+      if (
+        headerText.includes("Product/service") &&
+        headerText.includes("Description") &&
+        headerText.includes("Qty")
+      ) {
         return table;
       }
     }
     return null;
   }
 
-  function getVisibleHeaderMap(table) {
-    const headers = Array.from(table.querySelectorAll("thead th")).filter(isVisible);
-    const map = {};
-
-    headers.forEach((th) => {
-      const label = normalizeText(th.textContent).toLowerCase();
-      const x = getCenterX(th);
-
-      if (/product\s*\/?\s*service/.test(label)) map.product = { el: th, x, label };
-      else if (label === "sku") map.sku = { el: th, x, label };
-      else if (label === "description") map.description = { el: th, x, label };
-      else if (label === "qty" || label === "quantity") map.qty = { el: th, x, label };
-      else if (label === "rate") map.rate = { el: th, x, label };
-      else if (label === "amount") map.amount = { el: th, x, label };
-      else if (label === "gst") map.gst = { el: th, x, label };
-    });
-
-    return map;
+  function extractCustomFieldValue(root, labelText) {
+    const fields = Array.from(root.querySelectorAll(".custom-form-field"));
+    for (const field of fields) {
+      const label = normalizeText(
+        field.querySelector(".ReadAndWriteCustomFieldStyles__RethinkCFLabel-kivstf-6, .custom-field-input div")?.textContent || ""
+      );
+      if (label.toLowerCase() === labelText.toLowerCase()) {
+        const input = field.querySelector("input, textarea, select");
+        return getElementValue(input);
+      }
+    }
+    return "";
   }
 
   function extractHeaderData(root) {
-    const text = root?.textContent || "";
+    const billingAddress =
+      getElementValue(root.querySelector('textarea[aria-label="billToTextAreaLabel"]')) || "N/A";
+
+    const shippingAddress =
+      getElementValue(root.querySelector('textarea[aria-label="shipToTextAreaLabel"]')) || "N/A";
 
     const invoiceNumber =
-      getElementValue(root.querySelector('input[aria-label*="Invoice no"]')) ||
-      getElementValue(root.querySelector('input[aria-label*="Invoice number"]')) ||
-      (text.match(/\bInvoice\s+no\.?\s*([0-9]{3,})\b/i)?.[1] ?? "") ||
-      (text.match(/\bInvoice\s+([0-9]{3,})\b/i)?.[1] ?? "N/A");
+      normalizeText(
+        getElementValue(root.querySelector('[data-automation-id="readonly_reference_number"] span')) ||
+        getElementValue(root.querySelector('[data-automation-id="readonly_reference_number"]')) ||
+        ""
+      ) || "N/A";
 
     const invoiceDate =
-      getElementValue(root.querySelector('input[aria-label*="Invoice date"]')) ||
-      "N/A";
-
-    function findLabeledInput(labelText) {
-      const labels = Array.from(root.querySelectorAll("label, div, span"));
-      const found = labels.find((el) => normalizeText(el.textContent).toLowerCase() === labelText.toLowerCase());
-      if (!found) return "";
-      const container = found.closest("div") || found.parentElement;
-      if (!container) return "";
-      return getElementValue(container.querySelector("input, textarea, select"));
-    }
+      normalizeText(getElementValue(root.querySelector('input[data-testid="txn_date"]'))) || "N/A";
 
     return {
-      billingAddress: "N/A",
-      shippingAddress: "N/A",
-      invoiceNumber: normalizeText(invoiceNumber) || "N/A",
-      invoiceDate: normalizeText(invoiceDate) || "N/A",
-      orderNumber: findLabeledInput("ORDER NUMBER"),
-      jobName: findLabeledInput("JOB NAME"),
-      phoneNumber: findLabeledInput("Phone"),
+      billingAddress,
+      shippingAddress,
+      invoiceNumber,
+      invoiceDate,
+      orderNumber: extractCustomFieldValue(root, "ORDER NUMBER"),
+      jobName: extractCustomFieldValue(root, "JOB NAME"),
+      phoneNumber: extractCustomFieldValue(root, "Phone"),
     };
   }
 
@@ -200,60 +174,10 @@
     return false;
   }
 
-  function assignCellsToHeaders(cells, headerMap) {
-    const result = {
-      product: "",
-      sku: "",
-      description: "",
-      qty: "",
-    };
-
-    const targets = Object.entries(headerMap)
-      .filter(([, val]) => val && ["product", "sku", "description", "qty"].includes(arguments[1] ? "" : ""))
-      .map(([key, val]) => ({ key, x: val.x }));
-
-    const headerEntries = Object.entries(headerMap)
-      .filter(([key, val]) => val && ["product", "sku", "description", "qty"].includes(key))
-      .map(([key, val]) => ({ key, x: val.x }));
-
-    for (const cell of cells) {
-      if (!isVisible(cell)) continue;
-      const text = normalizeText(cell.textContent);
-      if (!text) continue;
-
-      const x = getCenterX(cell);
-
-      let closest = null;
-      let minDist = Infinity;
-
-      for (const header of headerEntries) {
-        const dist = Math.abs(header.x - x);
-        if (dist < minDist) {
-          minDist = dist;
-          closest = header;
-        }
-      }
-
-      if (closest && !result[closest.key]) {
-        result[closest.key] = text;
-      }
-    }
-
-    return result;
-  }
-
   function extractRows(root) {
     const table = findInvoiceTable(root);
     if (!table) {
-      warn("Invoice table not found.");
-      return [];
-    }
-
-    const headerMap = getVisibleHeaderMap(table);
-    log("Visible header map:", headerMap);
-
-    if (!headerMap.product || !headerMap.qty) {
-      warn("Could not find visible Product/service or Qty headers.");
+      warn("Invoice table not found");
       return [];
     }
 
@@ -262,7 +186,7 @@
       table.querySelector("tbody");
 
     if (!tbody) {
-      warn("Invoice tbody not found.");
+      warn("Invoice tbody not found");
       return [];
     }
 
@@ -272,25 +196,27 @@
     const rows = [];
 
     for (const tr of rowEls) {
-      const cells = Array.from(tr.querySelectorAll('td[role="cell"], td[role="gridcell"], td')).filter(isVisible);
+      const cells = Array.from(tr.querySelectorAll("td"));
       if (!cells.length) continue;
 
-      const mapped = assignCellsToHeaders(cells, headerMap);
+      // Markup shows:
+      // 1 blank add-line icon
+      // 2 drag
+      // 3 #
+      // 4 Product/service
+      // 5 SKU
+      // 6 Description
+      // 7 Qty
+      // 8 Rate
+      // 9 Amount
+      // 10 GST
+      const productName = normalizeText(cells[3]?.textContent || "");
+      const sku = normalizeText(cells[4]?.textContent || "");
+      const description = normalizeText(cells[5]?.textContent || "");
+      const quantity = tryParseNumber(cells[6]?.textContent || "") ?? 0;
 
-      let productName = mapped.product || "";
-      let sku = mapped.sku || "";
-      let description = mapped.description || "";
-      let quantityRaw = mapped.qty || "";
-      let quantity = tryParseNumber(quantityRaw) ?? 0;
-
-      // If product looks like description and description is empty, keep both for fallback logic
-      // but do not blank product here.
-
-      // Skip rows with absolutely no meaningful text
+      // Skip truly blank rows
       if (!productName && !sku && !description) continue;
-
-      // Guard against number-only junk rows
-      if (/^\d+$/.test(productName) && !sku && !description) continue;
 
       rows.push({
         key: `${productName}|${sku}|${description}|${quantity}`,
@@ -426,26 +352,29 @@
     let html = "";
 
     if (combineQuantities) {
+      // Pick Slip:
+      // - Use Product/service as product name
+      // - Use Qty column
+      // - Exclude category/header lines from Description
       const grouped = new Map();
 
       rows.forEach((row) => {
         const qty = Number(row.quantity || 0);
 
-        // pick slip: remove section/header rows
         if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) return;
 
-        // real product name must come from Product/service
+        // if there is no Product/service and only description, skip for pick slip
         if (!row.productName && row.description && !row.sku) return;
 
         if (!row.productName && !row.sku && qty === 0) return;
 
         const groupKey = row.sku
           ? `SKU:${row.sku}`
-          : `NAME:${row.productName || row.description}`;
+          : `NAME:${row.productName}`;
 
         if (!grouped.has(groupKey)) {
           grouped.set(groupKey, {
-            productName: row.productName || row.description || "",
+            productName: row.productName || "",
             sku: row.sku || "",
             quantity: qty,
           });
@@ -464,19 +393,22 @@
         `;
       });
     } else {
-      // print: keep section/header rows
+      // Print:
+      // - Use Product/service if present
+      // - Else use Description (for ***Kitchen*** etc)
+      // - Use Qty column
       rows.forEach((row) => {
-        const displayName = row.productName || (row.sku ? "" : row.description);
+        const displayName = row.productName || row.description || "";
 
-        if (displayName || row.sku) {
-          html += `
-            <tr style="height:30px;">
-              <td>${escapeHtml(displayName)}</td>
-              <td>${escapeHtml(row.sku)}</td>
-              <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
-            </tr>
-          `;
-        }
+        if (!displayName && !row.sku) return;
+
+        html += `
+          <tr style="height:30px;">
+            <td>${escapeHtml(displayName)}</td>
+            <td>${escapeHtml(row.sku || "")}</td>
+            <td style="text-align:right;">${escapeHtml(row.quantity || "")}</td>
+          </tr>
+        `;
       });
     }
 

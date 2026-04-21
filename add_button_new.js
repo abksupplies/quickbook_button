@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.5
-// @description  Print / Pick Slip for the new QuickBooks invoice editor using exact fields and input values
+// @version      5.6
+// @description  Print / Pick Slip for QuickBooks invoice editor using exact field selectors and header-mapped columns
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -40,6 +40,10 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function normalizeText(value) {
+    return String(value ?? "").replace(/\s+/g, " ").trim();
+  }
+
   function escapeHtml(value) {
     return String(value ?? "")
       .replaceAll("&", "&amp;")
@@ -47,10 +51,6 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#039;");
-  }
-
-  function normalizeText(value) {
-    return String(value ?? "").replace(/\s+/g, " ").trim();
   }
 
   function tryParseNumber(raw) {
@@ -88,7 +88,7 @@
 
     for (const root of roots) {
       const text = root.textContent || "";
-      if (text.includes("Product/service") && text.includes("Description")) {
+      if (text.includes("Product/service") && text.includes("Qty")) {
         return root;
       }
     }
@@ -100,58 +100,99 @@
     return isInvoicePage() && !!getInvoiceRoot();
   }
 
-  function getPreferredValue(el) {
+  function getInputValue(el) {
     if (!el) return "";
 
-    const inputLike = el.matches?.('input, textarea, select') ? el : el.querySelector?.('input, textarea, select');
-    if (inputLike) {
-      const v = inputLike.value ?? inputLike.getAttribute("value") ?? "";
-      if (normalizeText(v)) return normalizeText(v);
+    if (typeof el.value === "string" && normalizeText(el.value)) {
+      return normalizeText(el.value);
     }
 
-    const combo = el.querySelector?.('[role="combobox"], input[role="combobox"]');
-    if (combo) {
-      const v = combo.value ?? combo.getAttribute("value") ?? combo.getAttribute("aria-label") ?? "";
-      if (normalizeText(v)) return normalizeText(v);
+    const attrValue = el.getAttribute?.("value");
+    if (typeof attrValue === "string" && normalizeText(attrValue)) {
+      return normalizeText(attrValue);
     }
 
-    return normalizeText(el.textContent || "");
+    return "";
+  }
+
+  function getCellValue(cell) {
+    if (!cell) return "";
+
+    const directInput = cell.querySelector('input, textarea, select');
+    const directInputValue = getInputValue(directInput);
+    if (directInputValue) return directInputValue;
+
+    const combo = cell.querySelector('[role="combobox"]');
+    const comboValue = getInputValue(combo);
+    if (comboValue) return comboValue;
+
+    const text = normalizeText(cell.textContent || "");
+    return text;
   }
 
   function findInvoiceTable(root) {
     const tables = Array.from(root.querySelectorAll("table"));
+
     for (const table of tables) {
-      const headerText = normalizeText(table.querySelector("thead")?.textContent || "");
-      if (
-        headerText.includes("Product/service") &&
-        headerText.includes("Description") &&
-        headerText.includes("Qty")
-      ) {
+      const headers = Array.from(table.querySelectorAll("thead th")).map((th) =>
+        normalizeText(th.textContent)
+      );
+
+      const hasProduct = headers.some((h) => /product\s*\/?\s*service/i.test(h));
+      const hasDescription = headers.some((h) => /^description$/i.test(h));
+      const hasQty = headers.some((h) => /^qty$/i.test(h) || /^quantity$/i.test(h));
+
+      if (hasProduct && hasDescription && hasQty) {
         return table;
       }
     }
+
     return null;
+  }
+
+  function buildHeaderIndexMap(table) {
+    const headers = Array.from(table.querySelectorAll("thead th"));
+    const map = {};
+
+    headers.forEach((th, index) => {
+      const label = normalizeText(th.textContent).toLowerCase();
+
+      if (/product\s*\/?\s*service/.test(label)) map.product = index;
+      else if (label === "sku") map.sku = index;
+      else if (label === "description") map.description = index;
+      else if (label === "qty" || label === "quantity") map.qty = index;
+      else if (label === "rate") map.rate = index;
+      else if (label === "amount") map.amount = index;
+      else if (label === "gst") map.gst = index;
+      else if (label === "service date") map.serviceDate = index;
+    });
+
+    return map;
   }
 
   function extractCustomFieldValue(root, labelText) {
     const fields = Array.from(root.querySelectorAll(".custom-form-field"));
+
     for (const field of fields) {
       const label = normalizeText(
         field.querySelector(".ReadAndWriteCustomFieldStyles__RethinkCFLabel-kivstf-6")?.textContent || ""
       );
+
       if (label.toLowerCase() === labelText.toLowerCase()) {
-        return getPreferredValue(field);
+        const input = field.querySelector("input, textarea, select");
+        return getInputValue(input);
       }
     }
+
     return "";
   }
 
   function extractHeaderData(root) {
     const billingAddress =
-      getPreferredValue(root.querySelector('textarea[aria-label="billToTextAreaLabel"]')) || "N/A";
+      getInputValue(root.querySelector('textarea[aria-label="billToTextAreaLabel"]')) || "N/A";
 
     const shippingAddress =
-      getPreferredValue(root.querySelector('textarea[aria-label="shipToTextAreaLabel"]')) || "N/A";
+      getInputValue(root.querySelector('textarea[aria-label="shipToTextAreaLabel"]')) || "N/A";
 
     const invoiceNumber =
       normalizeText(
@@ -161,7 +202,7 @@
       ) || "N/A";
 
     const invoiceDate =
-      getPreferredValue(root.querySelector('input[data-testid="txn_date"]')) || "N/A";
+      getInputValue(root.querySelector('input[data-testid="txn_date"]')) || "N/A";
 
     return {
       billingAddress,
@@ -174,14 +215,27 @@
     };
   }
 
-  function isCategoryRow(text) {
-    return /^\*+\s*.+?\s*\*+$/.test((text || "").trim());
+  function isCategoryRow(descriptionText) {
+    return /^\*+\s*.+?\s*\*+$/.test((descriptionText || "").trim());
   }
 
   function extractRows(root) {
     const table = findInvoiceTable(root);
     if (!table) {
       warn("Invoice table not found");
+      return [];
+    }
+
+    const headerMap = buildHeaderIndexMap(table);
+    log("Header map:", headerMap);
+
+    if (
+      headerMap.product == null ||
+      headerMap.sku == null ||
+      headerMap.description == null ||
+      headerMap.qty == null
+    ) {
+      warn("Required columns not found", headerMap);
       return [];
     }
 
@@ -201,27 +255,13 @@
 
     for (const tr of rowEls) {
       const cells = Array.from(tr.querySelectorAll("td"));
-      if (cells.length < 7) continue;
+      if (!cells.length) continue;
 
-      // Exact column map from your uploaded markup:
-      // 1 blank icon
-      // 2 drag
-      // 3 #
-      // 4 Product/service
-      // 5 SKU
-      // 6 Description
-      // 7 Qty
-      const productCell = cells[3];
-      const skuCell = cells[4];
-      const descriptionCell = cells[5];
-      const qtyCell = cells[6];
+      const productName = getCellValue(cells[headerMap.product]);
+      const sku = getCellValue(cells[headerMap.sku]);
+      const description = getCellValue(cells[headerMap.description]);
+      const quantity = tryParseNumber(getCellValue(cells[headerMap.qty])) ?? 0;
 
-      const productName = getPreferredValue(productCell);
-      const sku = getPreferredValue(skuCell);
-      const description = getPreferredValue(descriptionCell);
-      const quantity = tryParseNumber(getPreferredValue(qtyCell)) ?? 0;
-
-      // skip fully blank lines
       if (!productName && !sku && !description) continue;
 
       rows.push({
@@ -263,9 +303,11 @@
     for (let i = 0; i < CONFIG.stableReadAttempts; i++) {
       latest = extractData();
       const sig = stableRowsSignature(latest.rows);
+
       if (latest.rows.length > 0 && sig === previousSig) {
         return latest;
       }
+
       previousSig = sig;
       await sleep(CONFIG.stableReadDelayMs);
     }
@@ -359,9 +401,10 @@
 
     if (combineQuantities) {
       // Pick Slip:
-      // product name must come from Product/service
-      // qty must come from Qty
-      // category rows from Description must NOT show
+      // - Product Name = Product/service only
+      // - SKU = SKU column
+      // - Quantity = Qty column
+      // - Exclude category rows like ** Kitchen **
       const grouped = new Map();
 
       rows.forEach((row) => {
@@ -396,8 +439,8 @@
       });
     } else {
       // Print:
-      // use Product/service normally
-      // only use Description when it is a category/header like ** Kitchen **
+      // - normally use Product/service
+      // - only use Description when it is a category row like ** Kitchen **
       rows.forEach((row) => {
         let displayName = row.productName || "";
 
@@ -434,6 +477,9 @@
   }
 
   function generatePrintLayout(data, productTable) {
+    const orderNumber = data.orderNumber || "";
+    const phoneNumber = data.phoneNumber || "";
+
     return `
 <!DOCTYPE html>
 <html>
@@ -450,12 +496,12 @@
     .TMheader-left { width: 70%; display: flex; font-size: 13px; gap: 20px; }
     .TMheader-right { width: 30%; font-size: 10px; }
     .deliveryNote { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 13px; width: 100%; }
-    .deliveryNote p { margin-bottom: 0; }
+    .deliveryNote p { margin-bottom: 0; white-space: pre-line; }
     .deliveryNote > div { width: 33.3%; white-space: pre-line; }
     .orderProducts { margin-top: 20px; border-top: 1px solid #000; }
     .product-table { text-align: left; width: 100%; margin-top: 20px; font-size: 14px; border-collapse: collapse; }
     .product-table th { padding: 8px; text-align: left; }
-    .product-table td { padding: 6px; }
+    .product-table td { padding: 6px; vertical-align: top; }
     .product-table tbody tr td:last-child { text-align: right; }
     .orderNote { display: flex; justify-content: space-between; font-size: 14px; margin: 12px 0; }
     .input-group { display: flex; justify-content: space-between; margin-top: 20px; font-size: 12px; }
@@ -495,9 +541,9 @@
     <hr>
 
     <div class="orderNote">
-      <div><b>ORDER NUMBER</b><br/>${escapeHtml(data.orderNumber)}</div>
-      <div><b>JOB NAME</b><br/>${escapeHtml(data.jobName)}</div>
-      <div><b>PHONE</b><br/>${escapeHtml(data.phoneNumber)}</div>
+      <div><b>ORDER NUMBER</b><br/>${escapeHtml(orderNumber)}</div>
+      <div><b>JOB NAME</b><br/>${escapeHtml(data.jobName || "")}</div>
+      <div><b>PHONE</b><br/>${escapeHtml(phoneNumber)}</div>
     </div>
 
     <div class="orderProducts">${productTable}</div>

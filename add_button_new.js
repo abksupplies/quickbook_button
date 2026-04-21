@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.7
-// @description  Print / Pick Slip for QuickBooks invoice editor using exact field selectors and header-mapped column
+// @version      5.8
+// @description  Print / Pick Slip for QuickBooks invoice editor using exact field selectors and header-mapped columnn
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -324,7 +324,7 @@
       position: fixed;
       bottom: 4px;
       left: ${left};
-      padding: 8px 22px;
+      padding: 1px 22px 10px;
       background-color: #2ca01c;
       color: white;
       border: none;

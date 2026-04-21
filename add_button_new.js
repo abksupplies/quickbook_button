@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.4
-// @description  Print / Pick Slip for the new QuickBooks invoice editor using exact table columns
+// @version      5.5
+// @description  Print / Pick Slip for the new QuickBooks invoice editor using exact fields and input values
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -53,14 +53,6 @@
     return String(value ?? "").replace(/\s+/g, " ").trim();
   }
 
-  function getElementValue(el) {
-    if (!el) return "";
-    if (typeof el.value === "string") return el.value.trim();
-    const attrValue = el.getAttribute?.("value");
-    if (typeof attrValue === "string") return attrValue.trim();
-    return normalizeText(el.textContent || "");
-  }
-
   function tryParseNumber(raw) {
     if (raw == null) return null;
     const text = String(raw)
@@ -108,6 +100,24 @@
     return isInvoicePage() && !!getInvoiceRoot();
   }
 
+  function getPreferredValue(el) {
+    if (!el) return "";
+
+    const inputLike = el.matches?.('input, textarea, select') ? el : el.querySelector?.('input, textarea, select');
+    if (inputLike) {
+      const v = inputLike.value ?? inputLike.getAttribute("value") ?? "";
+      if (normalizeText(v)) return normalizeText(v);
+    }
+
+    const combo = el.querySelector?.('[role="combobox"], input[role="combobox"]');
+    if (combo) {
+      const v = combo.value ?? combo.getAttribute("value") ?? combo.getAttribute("aria-label") ?? "";
+      if (normalizeText(v)) return normalizeText(v);
+    }
+
+    return normalizeText(el.textContent || "");
+  }
+
   function findInvoiceTable(root) {
     const tables = Array.from(root.querySelectorAll("table"));
     for (const table of tables) {
@@ -127,11 +137,10 @@
     const fields = Array.from(root.querySelectorAll(".custom-form-field"));
     for (const field of fields) {
       const label = normalizeText(
-        field.querySelector(".ReadAndWriteCustomFieldStyles__RethinkCFLabel-kivstf-6, .custom-field-input div")?.textContent || ""
+        field.querySelector(".ReadAndWriteCustomFieldStyles__RethinkCFLabel-kivstf-6")?.textContent || ""
       );
       if (label.toLowerCase() === labelText.toLowerCase()) {
-        const input = field.querySelector("input, textarea, select");
-        return getElementValue(input);
+        return getPreferredValue(field);
       }
     }
     return "";
@@ -139,20 +148,20 @@
 
   function extractHeaderData(root) {
     const billingAddress =
-      getElementValue(root.querySelector('textarea[aria-label="billToTextAreaLabel"]')) || "N/A";
+      getPreferredValue(root.querySelector('textarea[aria-label="billToTextAreaLabel"]')) || "N/A";
 
     const shippingAddress =
-      getElementValue(root.querySelector('textarea[aria-label="shipToTextAreaLabel"]')) || "N/A";
+      getPreferredValue(root.querySelector('textarea[aria-label="shipToTextAreaLabel"]')) || "N/A";
 
     const invoiceNumber =
       normalizeText(
-        getElementValue(root.querySelector('[data-automation-id="readonly_reference_number"] span')) ||
-        getElementValue(root.querySelector('[data-automation-id="readonly_reference_number"]')) ||
+        root.querySelector('[data-automation-id="readonly_reference_number"] span')?.textContent ||
+        root.querySelector('[data-automation-id="readonly_reference_number"]')?.textContent ||
         ""
       ) || "N/A";
 
     const invoiceDate =
-      normalizeText(getElementValue(root.querySelector('input[data-testid="txn_date"]'))) || "N/A";
+      getPreferredValue(root.querySelector('input[data-testid="txn_date"]')) || "N/A";
 
     return {
       billingAddress,
@@ -165,13 +174,8 @@
     };
   }
 
-  function isHeaderOnlyRow(productName, description, sku, quantity) {
-    const text = (productName || description || "").trim();
-    if (sku) return false;
-    if (Number(quantity || 0) !== 0) return false;
-    if (!text) return true;
-    if (/^\*+\s*.+?\s*\*+$/.test(text)) return true;
-    return false;
+  function isCategoryRow(text) {
+    return /^\*+\s*.+?\s*\*+$/.test((text || "").trim());
   }
 
   function extractRows(root) {
@@ -197,25 +201,27 @@
 
     for (const tr of rowEls) {
       const cells = Array.from(tr.querySelectorAll("td"));
-      if (!cells.length) continue;
+      if (cells.length < 7) continue;
 
-      // Markup shows:
-      // 1 blank add-line icon
+      // Exact column map from your uploaded markup:
+      // 1 blank icon
       // 2 drag
       // 3 #
       // 4 Product/service
       // 5 SKU
       // 6 Description
       // 7 Qty
-      // 8 Rate
-      // 9 Amount
-      // 10 GST
-      const productName = normalizeText(cells[3]?.textContent || "");
-      const sku = normalizeText(cells[4]?.textContent || "");
-      const description = normalizeText(cells[5]?.textContent || "");
-      const quantity = tryParseNumber(cells[6]?.textContent || "") ?? 0;
+      const productCell = cells[3];
+      const skuCell = cells[4];
+      const descriptionCell = cells[5];
+      const qtyCell = cells[6];
 
-      // Skip truly blank rows
+      const productName = getPreferredValue(productCell);
+      const sku = getPreferredValue(skuCell);
+      const description = getPreferredValue(descriptionCell);
+      const quantity = tryParseNumber(getPreferredValue(qtyCell)) ?? 0;
+
+      // skip fully blank lines
       if (!productName && !sku && !description) continue;
 
       rows.push({
@@ -353,20 +359,16 @@
 
     if (combineQuantities) {
       // Pick Slip:
-      // - Use Product/service as product name
-      // - Use Qty column
-      // - Exclude category/header lines from Description
+      // product name must come from Product/service
+      // qty must come from Qty
+      // category rows from Description must NOT show
       const grouped = new Map();
 
       rows.forEach((row) => {
         const qty = Number(row.quantity || 0);
 
-        if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) return;
-
-        // if there is no Product/service and only description, skip for pick slip
-        if (!row.productName && row.description && !row.sku) return;
-
-        if (!row.productName && !row.sku && qty === 0) return;
+        if (isCategoryRow(row.description) && !row.productName && !row.sku) return;
+        if (!row.productName && !row.sku) return;
 
         const groupKey = row.sku
           ? `SKU:${row.sku}`
@@ -394,11 +396,14 @@
       });
     } else {
       // Print:
-      // - Use Product/service if present
-      // - Else use Description (for ***Kitchen*** etc)
-      // - Use Qty column
+      // use Product/service normally
+      // only use Description when it is a category/header like ** Kitchen **
       rows.forEach((row) => {
-        const displayName = row.productName || row.description || "";
+        let displayName = row.productName || "";
+
+        if (!displayName && isCategoryRow(row.description)) {
+          displayName = row.description;
+        }
 
         if (!displayName && !row.sku) return;
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip (New UI Table Fix)
 // @namespace    http://tampermonkey.net/
-// @version      5.2
-// @description  Print / Pick Slip for new QuickBooks invoice editor
+// @version      5.3
+// @description  Print / Pick Slip for new QuickBooks invoice editor using visual column mapping
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
 // @include      https://qbo.intuit.com/app/invoice?*
@@ -74,6 +74,18 @@
     return Number.isFinite(value) ? value : null;
   }
 
+  function isVisible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  }
+
+  function getCenterX(el) {
+    const rect = el.getBoundingClientRect();
+    return rect.left + rect.width / 2;
+  }
+
   function isInvoicePage() {
     const url = location.href;
     const title = document.title || "";
@@ -118,31 +130,29 @@
       );
 
       const hasProduct = headerTexts.some((t) => /product\s*\/?\s*service/i.test(t));
-      const hasDescription = headerTexts.some((t) => /^description$/i.test(t));
       const hasQty = headerTexts.some((t) => /^qty$/i.test(t) || /^quantity$/i.test(t));
-
-      if (hasProduct && hasDescription && hasQty) {
+      if (hasProduct && hasQty) {
         return table;
       }
     }
     return null;
   }
 
-  function buildHeaderIndexMap(table) {
-    const headers = Array.from(table.querySelectorAll("thead th"));
+  function getVisibleHeaderMap(table) {
+    const headers = Array.from(table.querySelectorAll("thead th")).filter(isVisible);
     const map = {};
 
-    headers.forEach((th, index) => {
+    headers.forEach((th) => {
       const label = normalizeText(th.textContent).toLowerCase();
+      const x = getCenterX(th);
 
-      if (label === "#") map.lineNo = index;
-      else if (/product\s*\/?\s*service/.test(label)) map.product = index;
-      else if (label === "sku") map.sku = index;
-      else if (label === "description") map.description = index;
-      else if (label === "qty" || label === "quantity") map.qty = index;
-      else if (label === "rate") map.rate = index;
-      else if (label === "amount") map.amount = index;
-      else if (label === "gst") map.gst = index;
+      if (/product\s*\/?\s*service/.test(label)) map.product = { el: th, x, label };
+      else if (label === "sku") map.sku = { el: th, x, label };
+      else if (label === "description") map.description = { el: th, x, label };
+      else if (label === "qty" || label === "quantity") map.qty = { el: th, x, label };
+      else if (label === "rate") map.rate = { el: th, x, label };
+      else if (label === "amount") map.amount = { el: th, x, label };
+      else if (label === "gst") map.gst = { el: th, x, label };
     });
 
     return map;
@@ -190,9 +200,46 @@
     return false;
   }
 
-  function getCellTextByCapability(row, capabilityName) {
-    const selector = `td[class*="${capabilityName}"], [role="cell"][class*="${capabilityName}"]`;
-    return normalizeText(getElementValue(row.querySelector(selector)));
+  function assignCellsToHeaders(cells, headerMap) {
+    const result = {
+      product: "",
+      sku: "",
+      description: "",
+      qty: "",
+    };
+
+    const targets = Object.entries(headerMap)
+      .filter(([, val]) => val && ["product", "sku", "description", "qty"].includes(arguments[1] ? "" : ""))
+      .map(([key, val]) => ({ key, x: val.x }));
+
+    const headerEntries = Object.entries(headerMap)
+      .filter(([key, val]) => val && ["product", "sku", "description", "qty"].includes(key))
+      .map(([key, val]) => ({ key, x: val.x }));
+
+    for (const cell of cells) {
+      if (!isVisible(cell)) continue;
+      const text = normalizeText(cell.textContent);
+      if (!text) continue;
+
+      const x = getCenterX(cell);
+
+      let closest = null;
+      let minDist = Infinity;
+
+      for (const header of headerEntries) {
+        const dist = Math.abs(header.x - x);
+        if (dist < minDist) {
+          minDist = dist;
+          closest = header;
+        }
+      }
+
+      if (closest && !result[closest.key]) {
+        result[closest.key] = text;
+      }
+    }
+
+    return result;
   }
 
   function extractRows(root) {
@@ -202,8 +249,13 @@
       return [];
     }
 
-    const headerMap = buildHeaderIndexMap(table);
-    log("Header map:", headerMap);
+    const headerMap = getVisibleHeaderMap(table);
+    log("Visible header map:", headerMap);
+
+    if (!headerMap.product || !headerMap.qty) {
+      warn("Could not find visible Product/service or Qty headers.");
+      return [];
+    }
 
     const tbody =
       table.querySelector('tbody[data-smart-table-body="true"]') ||
@@ -220,42 +272,24 @@
     const rows = [];
 
     for (const tr of rowEls) {
-      const cells = Array.from(tr.querySelectorAll('td[role="cell"], td[role="gridcell"], td'));
+      const cells = Array.from(tr.querySelectorAll('td[role="cell"], td[role="gridcell"], td')).filter(isVisible);
       if (!cells.length) continue;
 
-      const texts = cells.map((cell) => normalizeText(cell.textContent));
+      const mapped = assignCellsToHeaders(cells, headerMap);
 
-      // Preferred: capability-based extraction
-      let productName =
-        getCellTextByCapability(tr, "ItemProductService") ||
-        "";
+      let productName = mapped.product || "";
+      let sku = mapped.sku || "";
+      let description = mapped.description || "";
+      let quantityRaw = mapped.qty || "";
+      let quantity = tryParseNumber(quantityRaw) ?? 0;
 
-      let sku =
-        getCellTextByCapability(tr, "ItemSku") ||
-        getCellTextByCapability(tr, "ItemSKU") ||
-        "";
+      // If product looks like description and description is empty, keep both for fallback logic
+      // but do not blank product here.
 
-      let description =
-        getCellTextByCapability(tr, "ItemDescription") ||
-        "";
-
-      let quantityRaw =
-        getCellTextByCapability(tr, "ItemQty") ||
-        getCellTextByCapability(tr, "ItemQuantity") ||
-        "";
-
-      // Fallback to header map if capability selectors not found
-      if (!productName && headerMap.product != null) productName = texts[headerMap.product] || "";
-      if (!sku && headerMap.sku != null) sku = texts[headerMap.sku] || "";
-      if (!description && headerMap.description != null) description = texts[headerMap.description] || "";
-      if (!quantityRaw && headerMap.qty != null) quantityRaw = texts[headerMap.qty] || "";
-
-      const quantity = tryParseNumber(quantityRaw) ?? 0;
-
-      // Skip blank rows
+      // Skip rows with absolutely no meaningful text
       if (!productName && !sku && !description) continue;
 
-      // Guard against line-number or pure numeric misreads
+      // Guard against number-only junk rows
       if (/^\d+$/.test(productName) && !sku && !description) continue;
 
       rows.push({
@@ -397,8 +431,12 @@
       rows.forEach((row) => {
         const qty = Number(row.quantity || 0);
 
-        // Pick Slip: remove header-only rows
+        // pick slip: remove section/header rows
         if (isHeaderOnlyRow(row.productName, row.description, row.sku, row.quantity)) return;
+
+        // real product name must come from Product/service
+        if (!row.productName && row.description && !row.sku) return;
+
         if (!row.productName && !row.sku && qty === 0) return;
 
         const groupKey = row.sku
@@ -426,7 +464,7 @@
         `;
       });
     } else {
-      // Print: keep section/header rows
+      // print: keep section/header rows
       rows.forEach((row) => {
         const displayName = row.productName || (row.sku ? "" : row.description);
 

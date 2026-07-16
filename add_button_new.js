@@ -189,21 +189,35 @@
 
   function extractHeaderData(root) {
     const billingAddress =
-      getInputValue(root.querySelector('textarea[aria-label="billToTextAreaLabel"]')) || "N/A";
-
+      getInputValue(
+        root.querySelector('textarea[aria-label="billToTextAreaLabel"]')
+      ) || "N/A";
+  
     const shippingAddress =
-      getInputValue(root.querySelector('textarea[aria-label="shipToTextAreaLabel"]')) || "N/A";
-
+      getInputValue(
+        root.querySelector(
+          'textarea[aria-label="Ship to"], ' +
+          'textarea[aria-label="shipToTextAreaLabel"], ' +
+          '.txp-capability-shipToAddress-gZVCq textarea'
+        )
+      ) || "N/A";
+  
     const invoiceNumber =
       normalizeText(
-        root.querySelector('[data-automation-id="readonly_reference_number"] span')?.textContent ||
-        root.querySelector('[data-automation-id="readonly_reference_number"]')?.textContent ||
+        root.querySelector(
+          '[data-automation-id="readonly_reference_number"] span'
+        )?.textContent ||
+        root.querySelector(
+          '[data-automation-id="readonly_reference_number"]'
+        )?.textContent ||
         ""
       ) || "N/A";
-
+  
     const invoiceDate =
-      getInputValue(root.querySelector('input[data-testid="txn_date"]')) || "N/A";
-
+      getInputValue(
+        root.querySelector('input[data-testid="txn_date"]')
+      ) || "N/A";
+  
     return {
       billingAddress,
       shippingAddress,

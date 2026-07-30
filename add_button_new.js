@@ -1137,18 +1137,30 @@
     .order-grid {
       display: grid;
       grid-template-columns:
-        1fr 1fr 0.5fr;
+        1fr 1fr 0.6fr;
       gap: 28px;
       padding: 2px 0 9px;
+      align-items: start;
     }
 
-    .order-grid > div:nth-child(2) {
-      text-align: center;
-    }
+    
+.order-grid > div:nth-child(1) {
+    text-align: left;
+}
 
-    .order-grid > div:nth-child(3) {
-      text-align: right;
-    }
+
+.order-grid > div:nth-child(2) {
+    text-align: left;         
+    justify-self: center;      
+    width: 100%;
+    max-width: 420px;
+}
+
+
+.order-grid > div:nth-child(3) {
+    text-align: right;         
+    justify-self: end;
+}
 
     .order-value {
       min-height: 17px;

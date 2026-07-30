@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip
 // @namespace    http://tampermonkey.net/
-// @version      6.2
+// @version      6.3
 // @description  Generates delivery notes and pick slips from the current QuickBooks invoice UI
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
@@ -28,9 +28,9 @@
     printing: false,
   };
 
-  // ---------------------------------------------------------
-  // General helpers
-  // ---------------------------------------------------------
+  // =========================================================
+  // Logging and general helpers
+  // =========================================================
 
   function log(...args) {
     if (CONFIG.debug) {
@@ -88,13 +88,13 @@
   function getInputValue(element) {
     if (!element) return "";
 
-    if (
-      typeof element.value === "string" &&
-      normalizeText(element.value)
-    ) {
-      return element.tagName === "TEXTAREA"
-        ? normalizeMultiline(element.value)
-        : normalizeText(element.value);
+    if (typeof element.value === "string") {
+      const value =
+        element.tagName === "TEXTAREA"
+          ? normalizeMultiline(element.value)
+          : normalizeText(element.value);
+
+      if (value) return value;
     }
 
     const attributeValue = element.getAttribute?.("value");
@@ -112,10 +112,6 @@
   function getCellValue(cell) {
     if (!cell) return "";
 
-    /*
-     * Product, quantity and other editable QBO cells usually keep their
-     * real values inside nested inputs or textareas.
-     */
     const preferredElements = Array.from(
       cell.querySelectorAll(
         [
@@ -134,41 +130,81 @@
 
     for (const element of preferredElements) {
       const value = getInputValue(element);
-      if (value) return value;
+
+      if (value) {
+        return value;
+      }
     }
 
     return normalizeText(cell.textContent || "");
+  }
+
+  function queryFirst(searchRoot, selectors) {
+    if (!searchRoot) return null;
+
+    for (const selector of selectors) {
+      const element = searchRoot.querySelector(selector);
+
+      if (element) {
+        return element;
+      }
+    }
+
+    return null;
+  }
+
+  function getValueFromRootOrDocument(root, selectors) {
+    const rootElement = queryFirst(root, selectors);
+    const rootValue = getInputValue(rootElement);
+
+    if (rootValue) {
+      return rootValue;
+    }
+
+    if (root !== document) {
+      const documentElement = queryFirst(document, selectors);
+      return getInputValue(documentElement);
+    }
+
+    return "";
   }
 
   function joinCustomerAndAddress(customerName, billingAddress) {
     const customer = normalizeText(customerName);
     const address = normalizeMultiline(billingAddress);
 
-    if (!customer) return address || "N/A";
-    if (!address) return customer;
+    if (!customer) {
+      return address || "N/A";
+    }
 
-    const lines = address
+    if (!address) {
+      return customer;
+    }
+
+    const addressLines = address
       .split("\n")
       .map((line) => normalizeText(line))
       .filter(Boolean);
 
-    const customerLower = customer.toLowerCase();
+    const normalizedCustomer = customer.toLowerCase();
 
-    /*
-     * Do not prepend the customer when QuickBooks already put it into
-     * the Bill to textarea.
-     */
-    const customerAlreadyPresent = lines.some((line, index) => {
-      if (index > 1) return false;
+    const customerAlreadyPresent = addressLines.some(
+      (line, index) => {
+        if (index > 1) return false;
 
-      const lineLower = line.toLowerCase();
+        const normalizedLine = line.toLowerCase();
 
-      return (
-        lineLower === customerLower ||
-        lineLower.startsWith(`${customerLower} `) ||
-        customerLower.startsWith(`${lineLower} `)
-      );
-    });
+        return (
+          normalizedLine === normalizedCustomer ||
+          normalizedLine.startsWith(
+            `${normalizedCustomer} `
+          ) ||
+          normalizedCustomer.startsWith(
+            `${normalizedLine} `
+          )
+        );
+      }
+    );
 
     if (customerAlreadyPresent) {
       return address;
@@ -177,9 +213,9 @@
     return `${customer}\n${address}`;
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // QuickBooks page detection
-  // ---------------------------------------------------------
+  // =========================================================
 
   function isInvoicePage() {
     const url = location.href;
@@ -193,40 +229,69 @@
   }
 
   function getInvoiceId() {
-    const match = location.href.match(/[?&]txnId=([^&]+)/);
-    return match ? decodeURIComponent(match[1]) : null;
+    const match = location.href.match(
+      /[?&]txnId=([^&]+)/
+    );
+
+    return match
+      ? decodeURIComponent(match[1])
+      : null;
   }
 
   function getInvoiceRoot() {
-    const roots = [
-      document.querySelector("#sales-forms-ui\\/edit_or_preview_form"),
-      document.querySelector('[id="sales-forms-ui/edit_or_preview_form"]'),
-      document.querySelector('[data-id="editForm"]'),
-      document.querySelector(".trowser-view .body"),
-      document.querySelector('[data-automation-id="invoice-form"]'),
-      document.querySelector('[data-automation-id="invoice-editor"]'),
+    const candidates = [
+      document.querySelector(
+        '[id="sales-forms-ui/edit_or_preview_form"]'
+      ),
+      document.querySelector(
+        '[data-id="editForm"]'
+      ),
+      document.querySelector(
+        '[data-automation-id="RethinkLayout"]'
+      ),
+      document.querySelector(
+        ".trowser-view .body"
+      ),
+      document.querySelector(
+        '[data-automation-id="invoice-form"]'
+      ),
+      document.querySelector(
+        '[data-automation-id="invoice-editor"]'
+      ),
       document.querySelector("#qbo-main"),
       document.querySelector("#app"),
       document.querySelector("main"),
       document.body,
     ].filter(Boolean);
 
-    for (const root of roots) {
+    for (const candidate of candidates) {
       const hasCustomer =
-        root.querySelector('input[aria-label="Customer"]') ||
-        root.querySelector('[data-cy="quickfill-contact"]');
+        candidate.querySelector(
+          'input[aria-label="Customer"]'
+        ) ||
+        candidate.querySelector(
+          '[data-cy="quickfill-contact"]'
+        );
 
       const hasInvoiceNumber =
-        root.querySelector(
+        candidate.querySelector(
           '[data-automation-id="readonly_reference_number"]'
         );
 
-      const hasLineTable =
-        root.querySelector('tbody[data-smart-table-body="true"]') ||
-        root.querySelector('input[aria-label^="Product or service line"]');
+      const hasInvoiceTable =
+        candidate.querySelector(
+          'tbody[data-smart-table-body="true"]'
+        ) ||
+        candidate.querySelector(
+          'input[aria-label^="Product or service line"]'
+        );
 
-      if (hasCustomer || hasInvoiceNumber || hasLineTable) {
-        return root;
+      if (
+        hasCustomer ||
+        hasInvoiceNumber ||
+        hasInvoiceTable
+      ) {
+        return candidate;
       }
     }
 
@@ -234,127 +299,248 @@
   }
 
   function isInvoiceEditorOpen() {
-    return isInvoicePage() && Boolean(getInvoiceRoot());
+    return (
+      isInvoicePage() &&
+      Boolean(getInvoiceRoot())
+    );
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Invoice header extraction
-  // ---------------------------------------------------------
+  // =========================================================
 
   function extractCustomerName(root) {
-    const directCustomerInput =
-      root.querySelector('input[aria-label="Customer"]') ||
-      root.querySelector(
-        '[data-cy="quickfill-contact"] input[role="combobox"]'
+    const customerSelectors = [
+      'input[aria-label="Customer"]',
+      '[data-cy="quickfill-contact"] input[role="combobox"]',
+      '.qf-contact input[data-testid="__textField"]',
+      '.qf-contact input',
+    ];
+
+    const customerInput =
+      queryFirst(root, customerSelectors) ||
+      queryFirst(document, customerSelectors);
+
+    const customerInputValue =
+      getInputValue(customerInput);
+
+    if (customerInputValue) {
+      return customerInputValue;
+    }
+
+    const quickfill =
+      root?.querySelector(
+        '[data-cy="quickfill-contact"] .QuickfillsContainer[data-props]'
       ) ||
-      root.querySelector(
-        '.qf-contact input[data-testid="__textField"]'
+      document.querySelector(
+        '[data-cy="quickfill-contact"] .QuickfillsContainer[data-props]'
       );
 
-    const directValue = getInputValue(directCustomerInput);
-    if (directValue) return directValue;
+    const rawProperties =
+      quickfill?.getAttribute("data-props");
 
-    /*
-     * Fallback: the customer Quickfill stores its display name inside
-     * the data-props JSON attribute.
-     */
-    const quickfill = root.querySelector(
-      '[data-cy="quickfill-contact"] .QuickfillsContainer[data-props]'
-    );
-
-    const rawProps = quickfill?.getAttribute("data-props");
-
-    if (rawProps) {
+    if (rawProperties) {
       try {
-        const parsed = JSON.parse(rawProps);
+        const parsedProperties =
+          JSON.parse(rawProperties);
+
         const displayName = normalizeText(
-          parsed?.contact?.displayName || ""
+          parsedProperties?.contact?.displayName ||
+            ""
         );
 
-        if (displayName) return displayName;
+        if (displayName) {
+          return displayName;
+        }
       } catch (error) {
-        warn("Could not parse customer quickfill data.", error);
+        warn(
+          "Could not parse customer QuickFill data.",
+          error
+        );
       }
     }
 
     return "";
   }
 
-  function extractCustomFieldValue(root, targetLabel) {
-    const target = normalizeText(targetLabel).toLowerCase();
-    const fields = Array.from(
-      root.querySelectorAll(".custom-form-field")
-    );
+  function extractCustomFieldValue(
+    root,
+    targetLabel
+  ) {
+    const normalizedTarget =
+      normalizeText(targetLabel).toLowerCase();
 
-    for (const field of fields) {
-      const labelElement =
-        field.querySelector(
-          '[class*="RethinkCFLabel"]'
-        ) ||
-        field.querySelector(".custom-field-input > div > div:first-child");
+    /*
+     * QuickBooks may render the custom-field form outside the
+     * invoice root selected above. Search the invoice root first
+     * and then the whole document.
+     */
+    const searchRoots = [];
 
-      const label = normalizeText(
-        labelElement?.textContent || ""
-      ).toLowerCase();
+    if (root) {
+      searchRoots.push(root);
+    }
 
-      if (label !== target) continue;
+    if (root !== document) {
+      searchRoots.push(document);
+    }
 
-      const input = field.querySelector(
-        "input, textarea, select"
+    for (const searchRoot of searchRoots) {
+      const fields = Array.from(
+        searchRoot.querySelectorAll(
+          ".custom-form-field"
+        )
       );
 
-      /*
-       * Only return the real field value. Never use the wrapper's
-       * textContent because that includes ORDER NUMBER, JOB NAME or Phone.
-       */
-      return getInputValue(input);
+      for (const field of fields) {
+        const labelCandidates = Array.from(
+          field.querySelectorAll(
+            [
+              '[class*="RethinkCFLabel"]',
+              ".custom-field-input > div > div:first-child",
+              ".custom-field-input div",
+            ].join(",")
+          )
+        );
+
+        const matchingLabel =
+          labelCandidates.find((element) => {
+            return (
+              normalizeText(
+                element.textContent
+              ).toLowerCase() ===
+              normalizedTarget
+            );
+          });
+
+        if (!matchingLabel) {
+          continue;
+        }
+
+        /*
+         * Read only the nested input. Do not use the wrapper's
+         * textContent because that includes the label.
+         */
+        const input =
+          field.querySelector(
+            ".custom-fields-input-text-field input"
+          ) ||
+          field.querySelector(
+            ".custom-field-input input"
+          ) ||
+          field.querySelector(
+            "input, textarea, select"
+          );
+
+        if (!input) {
+          return "";
+        }
+
+        return getInputValue(input);
+      }
+    }
+
+    /*
+     * Extra fallback using the stable custom-field definition IDs
+     * present in the input names.
+     */
+    const knownFieldSuffixes = {
+      "order number": "1700000000000127549",
+      "job name": "1700000000000127550",
+      phone: "1700000000000494174",
+    };
+
+    const fieldSuffix =
+      knownFieldSuffixes[normalizedTarget];
+
+    if (fieldSuffix) {
+      const fallbackInput =
+        document.querySelector(
+          `.custom-form-field input[name$="${fieldSuffix}"]`
+        ) ||
+        document.querySelector(
+          `input[name$="${fieldSuffix}"]`
+        );
+
+      return getInputValue(fallbackInput);
     }
 
     return "";
   }
 
   function extractHeaderData(root) {
-    const customerName = extractCustomerName(root);
+    const customerName =
+      extractCustomerName(root);
 
     const rawBillingAddress =
-      getInputValue(
-        root.querySelector(
-          'textarea[aria-label="billToTextAreaLabel"]'
-        )
-      ) || "";
+      getValueFromRootOrDocument(root, [
+        'textarea[aria-label="billToTextAreaLabel"]',
+        '[class*="billToAddress"] textarea',
+      ]);
 
-    const billingAddress = joinCustomerAndAddress(
-      customerName,
-      rawBillingAddress
-    );
+    const billingAddress =
+      joinCustomerAndAddress(
+        customerName,
+        rawBillingAddress
+      );
 
     const shippingAddress =
-      getInputValue(
-        root.querySelector(
-          [
-            'textarea[aria-label="Ship to"]',
-            'textarea[aria-label="shipToTextAreaLabel"]',
-            '[class*="shipToAddress"] textarea',
-            '[class*="shipTo-"] textarea',
-          ].join(",")
-        )
-      ) || "N/A";
+      getValueFromRootOrDocument(root, [
+        'textarea[aria-label="Ship to"]',
+        'textarea[aria-label="shipToTextAreaLabel"]',
+        '[class*="shipToAddress"] textarea',
+        '[class*="shipTo-"] textarea',
+      ]) || "N/A";
+
+    const invoiceNumberElement =
+      queryFirst(root, [
+        '[data-automation-id="readonly_reference_number"] span',
+        '[data-automation-id="readonly_reference_number"]',
+      ]) ||
+      queryFirst(document, [
+        '[data-automation-id="readonly_reference_number"] span',
+        '[data-automation-id="readonly_reference_number"]',
+      ]);
 
     const invoiceNumber =
       normalizeText(
-        root.querySelector(
-          '[data-automation-id="readonly_reference_number"] span'
-        )?.textContent ||
-        root.querySelector(
-          '[data-automation-id="readonly_reference_number"]'
-        )?.textContent ||
-        ""
+        invoiceNumberElement?.textContent || ""
       ) || "N/A";
 
     const invoiceDate =
-      getInputValue(
-        root.querySelector('input[data-testid="txn_date"]')
-      ) || "N/A";
+      getValueFromRootOrDocument(root, [
+        'input[data-testid="txn_date"]',
+        'input[aria-label="Invoice date"]',
+      ]) || "N/A";
+
+    const orderNumber =
+      extractCustomFieldValue(
+        root,
+        "ORDER NUMBER"
+      );
+
+    const jobName =
+      extractCustomFieldValue(
+        root,
+        "JOB NAME"
+      );
+
+    const phoneNumber =
+      extractCustomFieldValue(
+        root,
+        "Phone"
+      );
+
+    log("Extracted header data:", {
+      customerName,
+      billingAddress,
+      shippingAddress,
+      invoiceNumber,
+      invoiceDate,
+      orderNumber,
+      jobName,
+      phoneNumber,
+    });
 
     return {
       customerName,
@@ -362,53 +548,65 @@
       shippingAddress,
       invoiceNumber,
       invoiceDate,
-      orderNumber: extractCustomFieldValue(
-        root,
-        "ORDER NUMBER"
-      ),
-      jobName: extractCustomFieldValue(root, "JOB NAME"),
-      phoneNumber: extractCustomFieldValue(root, "Phone"),
+      orderNumber,
+      jobName,
+      phoneNumber,
     };
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Invoice line extraction
-  // ---------------------------------------------------------
+  // =========================================================
 
   function findInvoiceTable(root) {
-    const tables = Array.from(root.querySelectorAll("table"));
+    const searchRoots = [root, document].filter(
+      Boolean
+    );
 
-    for (const table of tables) {
-      const headers = Array.from(
-        table.querySelectorAll("thead th")
-      ).map((header) =>
-        normalizeText(header.textContent).toLowerCase()
+    for (const searchRoot of searchRoots) {
+      const tables = Array.from(
+        searchRoot.querySelectorAll("table")
       );
 
-      const hasProduct = headers.some((header) =>
-        /product\s*\/?\s*service/.test(header)
-      );
+      for (const table of tables) {
+        const headers = Array.from(
+          table.querySelectorAll("thead th")
+        ).map((header) =>
+          normalizeText(
+            header.textContent
+          ).toLowerCase()
+        );
 
-      const hasSku = headers.some(
-        (header) => header === "sku"
-      );
+        const hasProduct = headers.some(
+          (header) =>
+            /product\s*\/?\s*service/.test(
+              header
+            )
+        );
 
-      const hasDescription = headers.some(
-        (header) => header === "description"
-      );
+        const hasSku = headers.some(
+          (header) => header === "sku"
+        );
 
-      const hasQuantity = headers.some(
-        (header) =>
-          header === "qty" || header === "quantity"
-      );
+        const hasDescription = headers.some(
+          (header) =>
+            header === "description"
+        );
 
-      if (
-        hasProduct &&
-        hasSku &&
-        hasDescription &&
-        hasQuantity
-      ) {
-        return table;
+        const hasQuantity = headers.some(
+          (header) =>
+            header === "qty" ||
+            header === "quantity"
+        );
+
+        if (
+          hasProduct &&
+          hasSku &&
+          hasDescription &&
+          hasQuantity
+        ) {
+          return table;
+        }
       }
     }
 
@@ -417,6 +615,7 @@
 
   function buildHeaderIndexMap(table) {
     const map = {};
+
     const headers = Array.from(
       table.querySelectorAll("thead th")
     );
@@ -426,7 +625,9 @@
         header.textContent
       ).toLowerCase();
 
-      if (/product\s*\/?\s*service/.test(label)) {
+      if (
+        /product\s*\/?\s*service/.test(label)
+      ) {
         map.product = index;
       } else if (label === "sku") {
         map.sku = index;
@@ -447,11 +648,15 @@
     const table = findInvoiceTable(root);
 
     if (!table) {
-      warn("QuickBooks invoice product table was not found.");
+      warn(
+        "QuickBooks invoice product table was not found."
+      );
+
       return [];
     }
 
-    const headerMap = buildHeaderIndexMap(table);
+    const headerMap =
+      buildHeaderIndexMap(table);
 
     if (
       headerMap.product == null ||
@@ -463,16 +668,21 @@
         "Required invoice columns were not found.",
         headerMap
       );
+
       return [];
     }
 
     const tableBody =
       table.querySelector(
         'tbody[data-smart-table-body="true"]'
-      ) || table.querySelector("tbody");
+      ) ||
+      table.querySelector("tbody");
 
     if (!tableBody) {
-      warn("QuickBooks invoice table body was not found.");
+      warn(
+        "QuickBooks invoice table body was not found."
+      );
+
       return [];
     }
 
@@ -486,35 +696,46 @@
 
     for (const rowElement of rowElements) {
       const cells = Array.from(
-        rowElement.querySelectorAll(':scope > td')
+        rowElement.querySelectorAll(
+          ":scope > td"
+        )
       );
 
-      if (!cells.length) continue;
+      if (!cells.length) {
+        continue;
+      }
 
-      const productName = getCellValue(
-        cells[headerMap.product]
-      );
+      const productName =
+        getCellValue(
+          cells[headerMap.product]
+        );
 
-      const sku = getCellValue(cells[headerMap.sku]);
+      const sku =
+        getCellValue(cells[headerMap.sku]);
 
-      const description = getCellValue(
-        cells[headerMap.description]
-      );
+      const description =
+        getCellValue(
+          cells[headerMap.description]
+        );
 
-      const rawQuantity = getCellValue(
-        cells[headerMap.quantity]
-      );
+      const rawQuantity =
+        getCellValue(
+          cells[headerMap.quantity]
+        );
 
-      const parsedQuantity = tryParseNumber(rawQuantity);
+      const parsedQuantity =
+        tryParseNumber(rawQuantity);
 
-      /*
-       * Category/header lines legitimately have no quantity.
-       * Product lines should normally have one.
-       */
       const quantity =
-        parsedQuantity == null ? 0 : parsedQuantity;
+        parsedQuantity == null
+          ? 0
+          : parsedQuantity;
 
-      if (!productName && !sku && !description) {
+      if (
+        !productName &&
+        !sku &&
+        !description
+      ) {
         continue;
       }
 
@@ -527,6 +748,7 @@
     }
 
     log("Extracted invoice rows:", rows);
+
     return rows;
   }
 
@@ -553,9 +775,9 @@
     };
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Stable extraction
-  // ---------------------------------------------------------
+  // =========================================================
 
   function createDataSignature(data) {
     return JSON.stringify({
@@ -592,23 +814,30 @@
 
       if (
         latestData.rows.length > 0 &&
-        currentSignature === previousSignature
+        currentSignature ===
+          previousSignature
       ) {
         return latestData;
       }
 
-      previousSignature = currentSignature;
-      await sleep(CONFIG.stableReadDelayMs);
+      previousSignature =
+        currentSignature;
+
+      await sleep(
+        CONFIG.stableReadDelayMs
+      );
     }
 
     return latestData;
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Product-table generation
-  // ---------------------------------------------------------
+  // =========================================================
 
-  function isCategoryDescription(description) {
+  function isCategoryDescription(
+    description
+  ) {
     return /^\*+\s*.+?\s*\*+$/.test(
       normalizeText(description)
     );
@@ -617,7 +846,10 @@
   function formatQuantity(quantity) {
     const number = Number(quantity);
 
-    if (!Number.isFinite(number) || number === 0) {
+    if (
+      !Number.isFinite(number) ||
+      number === 0
+    ) {
       return "";
     }
 
@@ -626,7 +858,10 @@
       : String(number);
   }
 
-  function buildProductTable(rows, combineQuantities) {
+  function buildProductTable(
+    rows,
+    combineQuantities
+  ) {
     let tableRows = "";
 
     if (combineQuantities) {
@@ -634,51 +869,74 @@
        * Pick Slip:
        * - exclude category/description-only rows
        * - combine identical SKUs
-       * - use Product/service as product name
+       * - Product Name comes from Product/service
        */
       const groupedProducts = new Map();
 
       for (const row of rows) {
-        const isCategory =
+        const categoryRow =
           !row.productName &&
           !row.sku &&
-          isCategoryDescription(row.description);
+          isCategoryDescription(
+            row.description
+          );
 
-        if (isCategory) continue;
+        if (categoryRow) {
+          continue;
+        }
 
-        if (!row.productName && !row.sku) continue;
+        if (
+          !row.productName &&
+          !row.sku
+        ) {
+          continue;
+        }
 
-        const quantity = Number(row.quantity);
+        const quantity =
+          Number(row.quantity);
 
-        if (!Number.isFinite(quantity)) continue;
+        if (!Number.isFinite(quantity)) {
+          continue;
+        }
 
-        const normalizedSku = normalizeText(row.sku);
-        const normalizedName = normalizeText(
-          row.productName
-        );
+        const normalizedSku =
+          normalizeText(row.sku);
+
+        const normalizedName =
+          normalizeText(row.productName);
 
         const key = normalizedSku
           ? `SKU:${normalizedSku.toUpperCase()}`
           : `NAME:${normalizedName.toLowerCase()}`;
 
-        if (!groupedProducts.has(key)) {
+        if (
+          !groupedProducts.has(key)
+        ) {
           groupedProducts.set(key, {
             productName: normalizedName,
             sku: normalizedSku,
             quantity,
           });
         } else {
-          groupedProducts.get(key).quantity += quantity;
+          groupedProducts.get(
+            key
+          ).quantity += quantity;
         }
       }
 
       for (const product of groupedProducts.values()) {
         tableRows += `
           <tr>
-            <td>${escapeHtml(product.productName)}</td>
-            <td>${escapeHtml(product.sku)}</td>
+            <td>${escapeHtml(
+              product.productName
+            )}</td>
+            <td>${escapeHtml(
+              product.sku
+            )}</td>
             <td class="quantity-cell">${escapeHtml(
-              formatQuantity(product.quantity)
+              formatQuantity(
+                product.quantity
+              )
             )}</td>
           </tr>
         `;
@@ -686,33 +944,52 @@
     } else {
       /*
        * Print:
-       * - use Product/service for normal product rows
-       * - use Description only for category headers such as ** Kitchen **
+       * - Product/service for normal products
+       * - Description only for category headers such as ** Kitchen **
        */
       for (const row of rows) {
-        let displayName = normalizeText(row.productName);
+        let displayName =
+          normalizeText(row.productName);
 
-        const category =
+        const categoryRow =
           !displayName &&
           !normalizeText(row.sku) &&
-          isCategoryDescription(row.description);
+          isCategoryDescription(
+            row.description
+          );
 
-        if (category) {
-          displayName = normalizeText(row.description);
+        if (categoryRow) {
+          displayName =
+            normalizeText(
+              row.description
+            );
         }
 
-        if (!displayName && !normalizeText(row.sku)) {
+        if (
+          !displayName &&
+          !normalizeText(row.sku)
+        ) {
           continue;
         }
 
         tableRows += `
-          <tr class="${category ? "category-row" : ""}">
-            <td>${escapeHtml(displayName)}</td>
-            <td>${escapeHtml(row.sku)}</td>
+          <tr class="${
+            categoryRow
+              ? "category-row"
+              : ""
+          }">
+            <td>${escapeHtml(
+              displayName
+            )}</td>
+            <td>${escapeHtml(
+              row.sku
+            )}</td>
             <td class="quantity-cell">${escapeHtml(
-              category
+              categoryRow
                 ? ""
-                : formatQuantity(row.quantity)
+                : formatQuantity(
+                    row.quantity
+                  )
             )}</td>
           </tr>
         `;
@@ -720,7 +997,9 @@
     }
 
     if (!tableRows) {
-      return "<p>No valid invoice products were found.</p>";
+      return (
+        "<p>No valid invoice products were found.</p>"
+      );
     }
 
     return `
@@ -739,17 +1018,22 @@
     `;
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Print layout
-  // ---------------------------------------------------------
+  // =========================================================
 
-  function generatePrintLayout(data, productTable) {
+  function generatePrintLayout(
+    data,
+    productTable
+  ) {
     return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Invoice ${escapeHtml(data.invoiceNumber)}</title>
+  <title>Invoice ${escapeHtml(
+    data.invoiceNumber
+  )}</title>
 
   <style>
     * {
@@ -823,7 +1107,8 @@
 
     .address-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr 0.75fr;
+      grid-template-columns:
+        1fr 1fr 0.75fr;
       gap: 28px;
       width: 100%;
     }
@@ -851,7 +1136,8 @@
 
     .order-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr 0.5fr;
+      grid-template-columns:
+        1fr 1fr 0.5fr;
       gap: 28px;
       padding: 2px 0 9px;
     }
@@ -952,20 +1238,37 @@
   <div class="maincontainer">
     <div class="top-header">
       <div class="company-info">
-        <div>Adelaide Bathroom &amp; Kitchen Supplies</div>
-        <div>2/831 Lower North East Rd, Dernancourt</div>
+        <div>
+          Adelaide Bathroom &amp;
+          Kitchen Supplies
+        </div>
+        <div>
+          2/831 Lower North East Rd,
+          Dernancourt
+        </div>
         <div>(08) 7006 5181</div>
-        <div>Sales@abksupplies.com.au</div>
+        <div>
+          Sales@abksupplies.com.au
+        </div>
         <div>ABN 13 695 032 804</div>
       </div>
 
       <div class="received-box">
         <div class="received-title">
-          Received In Good Order &amp; Condition
+          Received In Good Order &amp;
+          Condition
         </div>
 
-        <textarea rows="1" placeholder="Name:"></textarea>
-        <textarea rows="2" placeholder="Sign:"></textarea>
+        <textarea
+          rows="1"
+          placeholder="Name:"
+        ></textarea>
+
+        <textarea
+          rows="2"
+          placeholder="Sign:"
+        ></textarea>
+
         <textarea
           rows="1"
           placeholder="Date: __ / __ / ____"
@@ -973,18 +1276,26 @@
       </div>
     </div>
 
-    <h2 class="delivery-title">Delivery Note</h2>
+    <h2 class="delivery-title">
+      Delivery Note
+    </h2>
 
     <div class="address-grid">
       <div>
-        <div class="address-heading">INVOICE TO</div>
+        <div class="address-heading">
+          INVOICE TO
+        </div>
+
         <div class="address-value">${escapeHtml(
           data.billingAddress
         )}</div>
       </div>
 
       <div>
-        <div class="address-heading">SHIP TO</div>
+        <div class="address-heading">
+          SHIP TO
+        </div>
+
         <div class="address-value">${escapeHtml(
           data.shippingAddress
         )}</div>
@@ -1009,21 +1320,30 @@
 
     <div class="order-grid">
       <div>
-        <div class="order-heading">ORDER NUMBER</div>
+        <div class="order-heading">
+          ORDER NUMBER
+        </div>
+
         <div class="order-value">${escapeHtml(
           data.orderNumber || ""
         )}</div>
       </div>
 
       <div>
-        <div class="order-heading">JOB NAME</div>
+        <div class="order-heading">
+          JOB NAME
+        </div>
+
         <div class="order-value">${escapeHtml(
           data.jobName || ""
         )}</div>
       </div>
 
       <div>
-        <div class="order-heading">PHONE</div>
+        <div class="order-heading">
+          PHONE
+        </div>
+
         <div class="order-value">${escapeHtml(
           data.phoneNumber || ""
         )}</div>
@@ -1035,8 +1355,13 @@
     </div>
 
     <div class="signoff">
-      <span>Picked By: _______________</span>
-      <span>Checked By: _______________</span>
+      <span>
+        Picked By: _______________
+      </span>
+
+      <span>
+        Checked By: _______________
+      </span>
     </div>
   </div>
 </body>
@@ -1044,34 +1369,40 @@
     `;
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Print execution
-  // ---------------------------------------------------------
+  // =========================================================
 
-  async function generateProductTable(combineQuantities) {
+  async function generateProductTable(
+    combineQuantities
+  ) {
     if (STATE.printing) return;
 
     STATE.printing = true;
 
     try {
-      const data = await getStableExtractedData();
+      const data =
+        await getStableExtractedData();
 
       if (!data.rows.length) {
         alert(
           "No invoice line items were found. Please allow the invoice to finish loading and try again."
         );
+
         return;
       }
 
-      const productTable = buildProductTable(
-        data.rows,
-        combineQuantities
-      );
+      const productTable =
+        buildProductTable(
+          data.rows,
+          combineQuantities
+        );
 
-      const printLayout = generatePrintLayout(
-        data,
-        productTable
-      );
+      const printLayout =
+        generatePrintLayout(
+          data,
+          productTable
+        );
 
       const printWindow = window.open(
         "",
@@ -1083,11 +1414,14 @@
         alert(
           "The print window was blocked. Please allow popups for qbo.intuit.com."
         );
+
         return;
       }
 
       printWindow.document.open();
-      printWindow.document.write(printLayout);
+      printWindow.document.write(
+        printLayout
+      );
       printWindow.document.close();
 
       const triggerPrint = () => {
@@ -1097,7 +1431,10 @@
         }, 350);
       };
 
-      if (printWindow.document.readyState === "complete") {
+      if (
+        printWindow.document.readyState ===
+        "complete"
+      ) {
         triggerPrint();
       } else {
         printWindow.addEventListener(
@@ -1111,12 +1448,18 @@
     }
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Custom buttons
-  // ---------------------------------------------------------
+  // =========================================================
 
-  function createButton(id, text, clickHandler, left) {
-    const button = document.createElement("button");
+  function createButton(
+    id,
+    text,
+    clickHandler,
+    left
+  ) {
+    const button =
+      document.createElement("button");
 
     button.id = id;
     button.type = "button";
@@ -1133,7 +1476,8 @@
       color: #fff;
       border: 0;
       border-radius: 5px;
-      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+      box-shadow:
+        0 2px 8px rgba(0,0,0,.12);
       cursor: pointer;
       font-family: Arial, sans-serif;
       font-size: 14px;
@@ -1146,53 +1490,83 @@
         box-shadow .15s ease;
     `;
 
-    button.addEventListener("mouseenter", () => {
-      button.style.backgroundColor = "#248f17";
-      button.style.transform = "translateY(-1px)";
-      button.style.boxShadow =
-        "0 4px 12px rgba(0,0,0,.16)";
-    });
+    button.addEventListener(
+      "mouseenter",
+      () => {
+        button.style.backgroundColor =
+          "#248f17";
 
-    button.addEventListener("mouseleave", () => {
-      button.style.backgroundColor = "#2ca01c";
-      button.style.transform = "translateY(0)";
-      button.style.boxShadow =
-        "0 2px 8px rgba(0,0,0,.12)";
-    });
+        button.style.transform =
+          "translateY(-1px)";
 
-    button.addEventListener("click", clickHandler);
+        button.style.boxShadow =
+          "0 4px 12px rgba(0,0,0,.16)";
+      }
+    );
+
+    button.addEventListener(
+      "mouseleave",
+      () => {
+        button.style.backgroundColor =
+          "#2ca01c";
+
+        button.style.transform =
+          "translateY(0)";
+
+        button.style.boxShadow =
+          "0 2px 8px rgba(0,0,0,.12)";
+      }
+    );
+
+    button.addEventListener(
+      "click",
+      clickHandler
+    );
 
     return button;
   }
 
   function removeButtons() {
     document
-      .getElementById("custom-print-button")
+      .getElementById(
+        "custom-print-button"
+      )
       ?.remove();
 
     document
-      .getElementById("custom-pick-slip-button")
+      .getElementById(
+        "custom-pick-slip-button"
+      )
       ?.remove();
   }
 
   async function addButtons() {
-    if (STATE.addButtonsInFlight) return;
+    if (STATE.addButtonsInFlight) {
+      return;
+    }
 
     STATE.addButtonsInFlight = true;
 
     try {
-      if (!isInvoicePage() || !isInvoiceEditorOpen()) {
+      if (
+        !isInvoicePage() ||
+        !isInvoiceEditorOpen()
+      ) {
         removeButtons();
         return;
       }
 
-      const invoiceId = getInvoiceId();
+      const invoiceId =
+        getInvoiceId();
 
       if (
         invoiceId &&
-        invoiceId !== STATE.currentInvoiceId
+        invoiceId !==
+          STATE.currentInvoiceId
       ) {
-        STATE.currentInvoiceId = invoiceId;
+        STATE.currentInvoiceId =
+          invoiceId;
+
         removeButtons();
       }
 
@@ -1205,7 +1579,8 @@
           createButton(
             "custom-print-button",
             "🖨️ Print",
-            () => generateProductTable(false),
+            () =>
+              generateProductTable(false),
             "14%"
           )
         );
@@ -1220,7 +1595,8 @@
           createButton(
             "custom-pick-slip-button",
             "📋 Pick Slip",
-            () => generateProductTable(true),
+            () =>
+              generateProductTable(true),
             "calc(14% + 125px)"
           )
         );
@@ -1230,55 +1606,81 @@
     }
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // QuickBooks SPA navigation handling
-  // ---------------------------------------------------------
+  // =========================================================
 
   function refreshButtons() {
     clearTimeout(STATE.mutationTimer);
 
-    STATE.mutationTimer = setTimeout(() => {
-      if (isInvoicePage() && isInvoiceEditorOpen()) {
-        addButtons();
-      } else {
-        removeButtons();
-      }
-    }, CONFIG.mutationDebounceMs);
+    STATE.mutationTimer =
+      setTimeout(() => {
+        if (
+          isInvoicePage() &&
+          isInvoiceEditorOpen()
+        ) {
+          addButtons();
+        } else {
+          removeButtons();
+        }
+      }, CONFIG.mutationDebounceMs);
   }
 
   function setupObservers() {
-    const originalPushState = history.pushState;
+    const originalPushState =
+      history.pushState;
 
-    history.pushState = function (...args) {
-      const result = originalPushState.apply(
-        history,
-        args
+    history.pushState = function (
+      ...args
+    ) {
+      const result =
+        originalPushState.apply(
+          history,
+          args
+        );
+
+      setTimeout(
+        refreshButtons,
+        500
       );
 
-      setTimeout(refreshButtons, 500);
       return result;
     };
 
     const originalReplaceState =
       history.replaceState;
 
-    history.replaceState = function (...args) {
-      const result = originalReplaceState.apply(
-        history,
-        args
+    history.replaceState = function (
+      ...args
+    ) {
+      const result =
+        originalReplaceState.apply(
+          history,
+          args
+        );
+
+      setTimeout(
+        refreshButtons,
+        500
       );
 
-      setTimeout(refreshButtons, 500);
       return result;
     };
 
-    window.addEventListener("popstate", () => {
-      setTimeout(refreshButtons, 500);
-    });
+    window.addEventListener(
+      "popstate",
+      () => {
+        setTimeout(
+          refreshButtons,
+          500
+        );
+      }
+    );
 
-    const observer = new MutationObserver(() => {
-      refreshButtons();
-    });
+    const observer =
+      new MutationObserver(() => {
+        refreshButtons();
+      });
 
     observer.observe(document.body, {
       childList: true,
@@ -1286,14 +1688,17 @@
     });
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // Initialise
-  // ---------------------------------------------------------
+  // =========================================================
 
   setupObservers();
 
   setInterval(() => {
-    if (isInvoicePage() && isInvoiceEditorOpen()) {
+    if (
+      isInvoicePage() &&
+      isInvoiceEditorOpen()
+    ) {
       addButtons();
     } else {
       removeButtons();
@@ -1301,7 +1706,10 @@
   }, CONFIG.buttonCheckIntervalMs);
 
   setTimeout(() => {
-    if (isInvoicePage() && isInvoiceEditorOpen()) {
+    if (
+      isInvoicePage() &&
+      isInvoiceEditorOpen()
+    ) {
       addButtons();
     }
   }, CONFIG.initialBootDelayMs);

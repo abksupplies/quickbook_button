@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         QuickBooks Invoice Print + Pick Slip
 // @namespace    http://tampermonkey.net/
-// @version      6.3
+// @version      6.4
 // @description  Generates delivery notes and pick slips from the current QuickBooks invoice UI
 // @author       Raj - Gorkhari
 // @match        https://qbo.intuit.com/*
